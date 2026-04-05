@@ -98,13 +98,18 @@ struct ExportView: View {
         let pipeline = project.buildPipeline()
         guard let processed = try? await pipeline.run(project.frames) else { return }
 
-        var results: [(ExportFormat, Int)] = []
-        for format in ExportFormat.allCases {
+        // Estimate the currently selected format first so the UI is responsive immediately.
+        let selected = project.exportFormat
+        if let data = try? await Encoder.encode(frames: processed, format: selected) {
+            exportResults.append((selected, data.count))
+        }
+
+        // Lazily estimate the remaining formats in the background.
+        for format in ExportFormat.allCases where format != selected {
             if let data = try? await Encoder.encode(frames: processed, format: format) {
-                results.append((format, data.count))
+                exportResults.append((format, data.count))
             }
         }
-        exportResults = results
     }
 
     private func exportAndShare() async {
@@ -116,11 +121,13 @@ struct ExportView: View {
             .appendingPathExtension(project.exportFormat.fileExtension)
         try? data.write(to: tempURL)
 
-        // Share via UIActivityViewController
+        // Share via UIActivityViewController — must present on the main thread.
         let activityVC = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let root = windowScene.windows.first?.rootViewController {
-            root.present(activityVC, animated: true)
+        await MainActor.run {
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let root = windowScene.windows.first?.rootViewController {
+                root.present(activityVC, animated: true)
+            }
         }
     }
 
@@ -130,7 +137,7 @@ struct ExportView: View {
         case .apng: "photo.stack"
         case .webp: "globe"
         case .mp4, .mov: "film"
-        case .heic: "apple.logo"
+        case .heic: "square.stack.3d.up"
         }
     }
 }
