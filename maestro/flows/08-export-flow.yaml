@@ -1,0 +1,26 @@
+appId: com.fastgif.app
+---
+# Flow: Export Flow Prerequisites
+# Verifies the app is in the correct initial state for export.
+# Export requires frames to be loaded first — this test verifies
+# the import screen is presented correctly and both tabs are functional.
+
+- launchApp
+- waitForAnimationToEnd
+
+# Verify we're on the import screen (no frames loaded = no export available)
+- assertVisible: "Create something"
+
+# Verify all import buttons are accessible
+- assertVisible: "From Video"
+- assertVisible: "From Photos"
+- assertVisible: "Open File"
+
+# Test tab switching round-trip
+- tapOn: "Batch"
+- waitForAnimationToEnd
+- assertVisible: "Add Files"
+
+- tapOn: "Create"
+- waitForAnimationToEnd
+- assertVisible: "Create something"

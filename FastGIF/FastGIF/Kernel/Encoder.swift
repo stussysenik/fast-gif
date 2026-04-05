@@ -4,6 +4,7 @@ import AVFoundation
 import CoreImage
 import UniformTypeIdentifiers
 import MobileCoreServices
+import FastGIFCore
 
 /// All supported export formats.
 enum ExportFormat: String, CaseIterable, Identifiable {
@@ -38,34 +39,61 @@ enum ExportFormat: String, CaseIterable, Identifiable {
 }
 
 /// Encodes Frame arrays into various output formats.
+/// GIF uses Rust NeuQuant engine for quality + speed.
 enum Encoder {
 
-    // MARK: - GIF
+    // MARK: - GIF (Rust NeuQuant)
 
-    static func encodeGIF(frames: [Frame], loopCount: Int = 0) throws -> Data {
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(
-            data, kUTTypeGIF, frames.count, nil
-        ) else { throw EncoderError.creationFailed }
+    static func encodeGIF(frames: [Frame], loopCount: Int = 0, colors: Int = 256) throws -> Data {
+        guard !frames.isEmpty else { throw EncoderError.noFrames }
 
-        let gifProperties: [CFString: Any] = [
-            kCGImagePropertyGIFDictionary: [
-                kCGImagePropertyGIFLoopCount: loopCount
-            ]
-        ]
-        CGImageDestinationSetProperties(dest, gifProperties as CFDictionary)
+        // Convert CGImage frames to RGBA pixel buffers for Rust
+        var rawFrames: [RawFrame] = []
+        var pixelBuffers: [UnsafeMutablePointer<UInt8>] = []
 
         for frame in frames {
-            let frameProps: [CFString: Any] = [
-                kCGImagePropertyGIFDictionary: [
-                    kCGImagePropertyGIFDelayTime: frame.delay
-                ]
-            ]
-            CGImageDestinationAddImage(dest, frame.image, frameProps as CFDictionary)
-        }
+            let w = frame.image.width
+            let h = frame.image.height
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: w * h * 4)
+            guard let ctx = CGContext(
+                data: buffer,
+                width: w, height: h,
+                bitsPerComponent: 8,
+                bytesPerRow: w * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else {
+                buffer.deallocate()
+                continue
+            }
+            ctx.draw(frame.image, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-        guard CGImageDestinationFinalize(dest) else { throw EncoderError.finalizeFailed }
-        return data as Data
+            rawFrames.append(RawFrame(
+                rgba: UnsafePointer(buffer),
+                width: UInt32(w),
+                height: UInt32(h),
+                delay_cs: UInt16(max(2, frame.delay * 100)) // seconds → centiseconds, min 20ms
+            ))
+            pixelBuffers.append(buffer)
+        }
+        defer { pixelBuffers.forEach { $0.deallocate() } }
+
+        guard !rawFrames.isEmpty else { throw EncoderError.noFrames }
+
+        guard let result = rawFrames.withUnsafeBufferPointer({ buf in
+            fastgif_encode(
+                buf.baseAddress,
+                buf.count,
+                UInt32(min(max(colors, 2), 256)),
+                UInt16(loopCount),
+                10 // quality: 1=best, 30=fastest. 10 is good balance.
+            )
+        }) else {
+            throw EncoderError.finalizeFailed
+        }
+        defer { fastgif_free(result) }
+
+        return Data(bytes: result.pointee.data, count: result.pointee.len)
     }
 
     // MARK: - APNG (iMessage sticker format)
@@ -84,12 +112,14 @@ enum Encoder {
         CGImageDestinationSetProperties(dest, pngProperties as CFDictionary)
 
         for frame in frames {
-            let frameProps: [CFString: Any] = [
-                kCGImagePropertyPNGDictionary: [
-                    kCGImagePropertyAPNGDelayTime: frame.delay
+            autoreleasepool {
+                let frameProps: [CFString: Any] = [
+                    kCGImagePropertyPNGDictionary: [
+                        kCGImagePropertyAPNGDelayTime: frame.delay
+                    ]
                 ]
-            ]
-            CGImageDestinationAddImage(dest, frame.image, frameProps as CFDictionary)
+                CGImageDestinationAddImage(dest, frame.image, frameProps as CFDictionary)
+            }
         }
 
         guard CGImageDestinationFinalize(dest) else { throw EncoderError.finalizeFailed }
@@ -134,16 +164,18 @@ enum Encoder {
             }
             try Task.checkCancellation()
 
-            let ciImage = CIImage(cgImage: frame.image)
-            guard let pool = adaptor.pixelBufferPool else { throw EncoderError.bufferPoolFailed }
-            var pixelBuffer: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
-            guard let buffer = pixelBuffer else { throw EncoderError.bufferCreationFailed }
-            context.render(ciImage, to: buffer)
+            try autoreleasepool {
+                let ciImage = CIImage(cgImage: frame.image)
+                guard let pool = adaptor.pixelBufferPool else { throw EncoderError.bufferPoolFailed }
+                var pixelBuffer: CVPixelBuffer?
+                CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
+                guard let buffer = pixelBuffer else { throw EncoderError.bufferCreationFailed }
+                context.render(ciImage, to: buffer)
 
-            let time = CMTime(seconds: currentTime, preferredTimescale: 600)
-            adaptor.append(buffer, withPresentationTime: time)
-            currentTime += frame.delay
+                let time = CMTime(seconds: currentTime, preferredTimescale: 600)
+                adaptor.append(buffer, withPresentationTime: time)
+                currentTime += frame.delay
+            }
         }
 
         input.markAsFinished()
@@ -173,14 +205,23 @@ enum Encoder {
             try await encodeVideo(frames: frames, format: format, outputURL: url)
             defer { try? FileManager.default.removeItem(at: url) }
             return try Data(contentsOf: url)
-        case .webp, .heic:
-            // WebP/HEIC animated: use CGImageDestination if available
+        case .webp:
             let data = NSMutableData()
             guard let dest = CGImageDestinationCreateWithData(
-                data, format.uti, frames.count, nil
+                data, format.uti, 1, nil
             ) else { throw EncoderError.formatUnsupported }
-            for frame in frames {
-                CGImageDestinationAddImage(dest, frame.image, nil)
+            if let first = frames.first {
+                CGImageDestinationAddImage(dest, first.image, nil)
+            }
+            guard CGImageDestinationFinalize(dest) else { throw EncoderError.finalizeFailed }
+            return data as Data
+        case .heic:
+            let data = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(
+                data, format.uti, 1, nil
+            ) else { throw EncoderError.formatUnsupported }
+            if let first = frames.first {
+                CGImageDestinationAddImage(dest, first.image, nil)
             }
             guard CGImageDestinationFinalize(dest) else { throw EncoderError.finalizeFailed }
             return data as Data

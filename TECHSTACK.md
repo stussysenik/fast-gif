@@ -2,7 +2,9 @@
 
 ## Why SwiftUI + Pure Apple Frameworks?
 
-**Zero dependencies.** Every framework in FastGIF ships with iOS. No CocoaPods, no SPM packages, no version conflicts, no supply chain risk. The app compiles with `xcodebuild` and nothing else.
+**Zero Swift package dependencies.** Every Apple framework in FastGIF ships with iOS. No CocoaPods, no SPM packages, no version conflicts, no supply chain risk. The app compiles with `xcodebuild` and nothing else.
+
+The one exception is a custom Rust crate (`fastgif-core`) compiled to a static library and wrapped in an XCFramework — it has its own Rust dependencies (`color_quant`, `gif`) but introduces zero Swift-level package overhead.
 
 This is a deliberate architectural choice, not laziness:
 
@@ -14,6 +16,7 @@ This is a deliberate architectural choice, not laziness:
 | Video decode | AVFoundation + VideoToolbox | FFmpeg, GStreamer | Hardware decode in silicon. No cross-compilation. No binary bloat. |
 | AI segmentation | Vision framework | Core ML + custom model | On-device, zero download, Apple-optimized. Good enough for v1. |
 | Concurrency | Swift structured concurrency | GCD, Combine, async-algorithms | Native cancellation, task groups for batch, no callback hell. |
+| GIF encoding | Rust FFI (fastgif-core) | pure Swift LZW, gifski | NeuQuant palette optimization via color_quant. Per-frame local palettes. Compiled to static lib, zero Swift deps. |
 
 ## The Pipeline Kernel (66 Lines)
 
@@ -126,19 +129,72 @@ Main Actor (UI)
 
 All pipeline work runs on Swift's cooperative thread pool. UI updates flow back to MainActor via `@Observable`. Cancellation is checked between every stage — cancelling an export stops the pipeline immediately.
 
-## Future: Rust FFI for Gifski Quality
+## Rust FFI — NeuQuant Encoding
 
-The single biggest quality improvement available is integrating the [gifski Rust crate](https://github.com/ImageOptim/gifski) (MIT licensed). Gifski uses:
+The GIF encoder is powered by a custom Rust crate called **fastgif-core**, compiled to a static library and bridged into Swift via C FFI. This is not a future plan — it's the current production encoder.
 
-- **Cross-frame palette optimization** — analyzes all frames to build a global palette, then per-frame local palettes that reference it
-- **Temporal dithering** — reduces flicker between frames
-- **pngquant's median-cut quantization** — superior to posterize for photographic content
+### Rust Crate Dependencies
 
-Integration path:
+The crate uses two Rust libraries:
+
+- **color_quant** — provides the NeuQuant algorithm, a neural-network-based color quantizer that produces superior palettes compared to median-cut or uniform quantization
+- **gif** — handles GIF file format encoding (LZW compression, frame control extensions, looping)
+
+### Build Pipeline
+
+The crate is cross-compiled for iOS via `rust/build-ios.sh`, which builds two targets:
+
 ```
-Rust (gifski crate) → cargo-lipo → universal iOS static lib (.a)
-                    → cbindgen → C header
-                    → Swift bridging header → FastGIF Stage
+cargo build --release --target aarch64-apple-ios-sim    # Simulator (Apple Silicon Mac)
+cargo build --release --target aarch64-apple-ios         # Physical devices
 ```
 
-This is planned for v1.2. The pipeline architecture makes it trivial — it's just another `Stage`.
+These are combined into a single XCFramework:
+
+```
+xcodebuild -create-xcframework \
+    -library .../aarch64-apple-ios-sim/release/libfastgif_core.a -headers include/ \
+    -library .../aarch64-apple-ios/release/libfastgif_core.a -headers include/ \
+    -output .../RustCore/FastGIFCore.xcframework
+```
+
+### Integration Surface
+
+| Artifact | Location |
+|----------|----------|
+| Rust crate source | `rust/fastgif-core/` |
+| C header | `RustCore/fastgif_core.h` |
+| XCFramework | `RustCore/FastGIFCore.xcframework` |
+| Swift import | `import FastGIFCore` in `Encoder.swift` |
+
+### Encoding Details
+
+The encoder produces **per-frame local palettes** using NeuQuant — there is no global palette. Each frame gets its own optimized color table:
+
+```swift
+fastgif_encode(
+    buf.baseAddress,
+    buf.count,
+    UInt32(min(max(colors, 2), 256)),  // colors: 2–256, clamped
+    UInt16(loopCount),
+    10  // quality: 1=best, 30=fastest. 10 is a good balance.
+)
+```
+
+- **Colors**: 2–256 per frame, clamped to valid range
+- **Quality**: NeuQuant sample factor of 10 (1 = best quality/slowest, 30 = fastest)
+- **Palettes**: Local per-frame — each frame gets independently optimized colors
+- **Output**: Heap-allocated `GIFOutput` struct, freed via `fastgif_free()`
+
+The pipeline architecture makes this trivially replaceable — the Rust encoder is just another `Stage` in the pipeline. If a superior algorithm becomes available, swapping it out requires changes only in `Encoder.swift`.
+
+## Codebase Stats
+
+| Metric | Value |
+|--------|-------|
+| Swift files | 20 |
+| Total Swift LOC | 2,410 |
+| Rust crate | fastgif-core |
+| Pipeline kernel | 66 lines |
+| External Swift packages | 0 |
+| Apple frameworks used | 6 (SwiftUI, AVFoundation, Accelerate, CoreImage, Vision, Photos) |

@@ -1,0 +1,4 @@
+module FastGIFCore {
+    header "fastgif_core.h"
+    export *
+}

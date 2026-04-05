@@ -5,8 +5,6 @@ import CoreImage
 /// Real-time GPU filter chain — Core Image powered.
 struct FilterView: View {
     @Bindable var project: GIFProject
-    @State private var selectedFilter: FilterPreset = .none
-    @State private var intensity: Float = 1.0
 
     var body: some View {
         VStack(spacing: Theme.spacing12) {
@@ -17,31 +15,24 @@ struct FilterView: View {
                     ForEach(FilterPreset.allCases) { preset in
                         FilterChip(
                             preset: preset,
-                            isSelected: selectedFilter == preset
+                            isSelected: project.filterPreset == preset
                         ) {
-                            selectedFilter = preset
-                            applyFilter()
+                            project.filterPreset = preset
                         }
                     }
                 }
             }
 
-            if selectedFilter != .none {
+            if project.filterPreset != .none {
                 HStack {
                     Text("Intensity")
                         .font(.caption)
                         .foregroundStyle(Theme.textSecondary)
-                    Slider(value: $intensity, in: 0...1)
-                        .onChange(of: intensity) { applyFilter() }
+                    Slider(value: $project.filterIntensity, in: 0...1)
                 }
             }
         }
         .cardStyle()
-    }
-
-    private func applyFilter() {
-        // Filter is applied at export time via the pipeline
-        // This just updates the preview state
     }
 }
 

@@ -4,7 +4,7 @@
 
 FastGIF exists to prove that a GIF creation app can be simultaneously:
 - **The simplest** — three steps: Import → Adjust → Export
-- **The highest quality** — GPU-accelerated encoding rivaling desktop tools
+- **The highest quality** — GPU-accelerated + Rust NeuQuant encoding rivaling desktop tools
 - **The most capable** — 6 export formats, batch processing, AI features, iMessage stickers
 
 The loss function is singular: **how well does the app transform regular users into power users?** Not feature count. Not download numbers. User elevation.
@@ -19,7 +19,7 @@ The iOS GIF market in 2026 has a clear split:
 
 **Quality encoders** (Gifski) — the gold standard for GIF quality, but macOS-only, video-only input, no editing, no batch processing.
 
-**Nobody combines Gifski-quality encoding with ImgPlay-level editing on iOS.** That's the gap. FastGIF fills it in under 2,000 lines.
+**Nobody combines Gifski-quality encoding with ImgPlay-level editing on iOS.** That's the gap. FastGIF fills it in under 2,500 lines.
 
 ## Philosophy
 
@@ -46,7 +46,17 @@ The pipeline kernel — `Source → Decode → Process → Encode → Export` �
 - **The kernel should be expressible in a single protocol.** If it takes more, the abstraction is wrong.
 - **Modules are Lego blocks.** They snap onto the pipeline. They don't know about each other.
 
-This constraint produces elegance by subtraction. The entire pipeline kernel is 66 lines. The entire app is 1,992 lines. Not because features were cut — because the architecture is honest.
+This constraint produces elegance by subtraction. The entire pipeline kernel is 66 lines. The entire app is 2,410 lines. Not because features were cut — because the architecture is honest.
+
+### Spec-Driven Development
+
+FastGIF is developed using a spec-first methodology. Before any code is written, the behavior is defined in specification documents (`TECHSTACK.md`, `VISION.md`, and project specs). These specs serve as:
+
+- **Architecture guardrails** — every component has a defined role before implementation
+- **Living documentation** — specs are updated when the system evolves, not rotting in a wiki
+- **Onboarding** — a new engineer can understand the entire system from these documents alone
+
+This approach keeps the codebase small and coherent. When a feature request arrives, the first question is "where does it fit in the spec?" — not "where do we hack it in?"
 
 ## Target Users
 
@@ -71,5 +81,5 @@ Builds iMessage sticker packs. Needs to fit Apple's constraints (500KB APNG, 3 s
 1. A first-time user creates and exports a GIF in under 30 seconds
 2. The same user discovers a power feature within their first session
 3. Export quality matches or exceeds Gifski on equivalent input
-4. The entire codebase fits in one senior engineer's head (~2,000 LOC)
-5. Zero external dependencies — ships with platform SDKs only
+4. The entire codebase fits in one senior engineer's head (~2,500 LOC)
+5. Zero Swift package dependencies — ships with platform SDKs plus a self-contained Rust static library for GIF encoding

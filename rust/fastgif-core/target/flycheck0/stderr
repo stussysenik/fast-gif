@@ -1,0 +1,129 @@
+   0.007433708s  INFO prepare_target{force=false package_id=fastgif-core v0.1.0 (/Users/s3nik/Desktop/fast-gif/rust/fastgif-core) target="fastgif_core"}: cargo::core::compiler::fingerprint: fingerprint error for fastgif-core v0.1.0 (/Users/s3nik/Desktop/fast-gif/rust/fastgif-core)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("fastgif_core", ["staticlib"], "/Users/s3nik/Desktop/fast-gif/rust/fastgif-core/src/lib.rs", Edition2021) }
+   0.007654958s  INFO prepare_target{force=false package_id=fastgif-core v0.1.0 (/Users/s3nik/Desktop/fast-gif/rust/fastgif-core) target="fastgif_core"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/s3nik/Desktop/fast-gif/rust/fastgif-core/target/debug/.fingerprint/fastgif-core-9642869ce1d3f1a5/lib-fastgif_core`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.024586750s  INFO prepare_target{force=false package_id=color_quant v1.1.0 target="color_quant"}: cargo::core::compiler::fingerprint: fingerprint error for color_quant v1.1.0/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("color_quant", ["lib"], "/Users/s3nik/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/color_quant-1.1.0/src/lib.rs", Edition2015) }
+   0.024600041s  INFO prepare_target{force=false package_id=color_quant v1.1.0 target="color_quant"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/s3nik/Desktop/fast-gif/rust/fastgif-core/target/debug/.fingerprint/color_quant-061e7cfe181cc012/lib-color_quant`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.024882250s  INFO prepare_target{force=false package_id=gif v0.13.3 target="gif"}: cargo::core::compiler::fingerprint: fingerprint error for gif v0.13.3/Check { test: false }/TargetInner { benched: false, ..: lib_target("gif", ["lib"], "/Users/s3nik/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gif-0.13.3/src/lib.rs", Edition2021) }
+   0.024886791s  INFO prepare_target{force=false package_id=gif v0.13.3 target="gif"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/s3nik/Desktop/fast-gif/rust/fastgif-core/target/debug/.fingerprint/gif-5b4e6931a6330cc3/lib-gif`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.025124041s  INFO prepare_target{force=false package_id=weezl v0.1.12 target="weezl"}: cargo::core::compiler::fingerprint: fingerprint error for weezl v0.1.12/Check { test: false }/TargetInner { benched: false, ..: lib_target("weezl", ["lib"], "/Users/s3nik/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/weezl-0.1.12/src/lib.rs", Edition2018) }
+   0.025129250s  INFO prepare_target{force=false package_id=weezl v0.1.12 target="weezl"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/s3nik/Desktop/fast-gif/rust/fastgif-core/target/debug/.fingerprint/weezl-fe037e4d2545afbf/lib-weezl`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: cargo::core::compiler::compile
+   8: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   9: cargo::ops::cargo_compile::compile_ws
+  10: cargo::ops::cargo_compile::compile_with_exec
+  11: cargo::ops::cargo_compile::compile
+  12: cargo::commands::check::exec
+  13: <cargo::cli::Exec>::exec
+  14: cargo::main
+  15: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  16: std::rt::lang_start::<()>::{closure#0}
+  17: std::rt::lang_start_internal
+  18: _main
+   0.025333875s  INFO prepare_target{force=false package_id=fastgif-core v0.1.0 (/Users/s3nik/Desktop/fast-gif/rust/fastgif-core) target="fastgif_core"}: cargo::core::compiler::fingerprint: fingerprint error for fastgif-core v0.1.0 (/Users/s3nik/Desktop/fast-gif/rust/fastgif-core)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("fastgif_core", ["staticlib"], "/Users/s3nik/Desktop/fast-gif/rust/fastgif-core/src/lib.rs", Edition2021) }
+   0.025338208s  INFO prepare_target{force=false package_id=fastgif-core v0.1.0 (/Users/s3nik/Desktop/fast-gif/rust/fastgif-core) target="fastgif_core"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/s3nik/Desktop/fast-gif/rust/fastgif-core/target/debug/.fingerprint/fastgif-core-5f0a04583d16e8a4/test-lib-fastgif_core`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+    Checking color_quant v1.1.0
+    Checking weezl v0.1.12
+    Checking gif v0.13.3
+    Checking fastgif-core v0.1.0 (/Users/s3nik/Desktop/fast-gif/rust/fastgif-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.60s

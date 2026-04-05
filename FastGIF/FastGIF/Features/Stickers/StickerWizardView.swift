@@ -7,6 +7,7 @@ struct StickerWizardView: View {
     @State private var result: StickerOptimizer.Result?
     @State private var isOptimizing = false
     @State private var removeBackground = false
+    @State private var shareItem: ShareItem?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -108,21 +109,19 @@ struct StickerWizardView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
+            .sheet(item: $shareItem) { item in
+                ActivityView(url: item.url)
+            }
         }
     }
 
     private func optimize() async {
         if let result {
-            // Export
             let tempURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("sticker")
                 .appendingPathExtension("apng")
             try? result.data.write(to: tempURL)
-            let activityVC = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let root = windowScene.windows.first?.rootViewController {
-                root.present(activityVC, animated: true)
-            }
+            shareItem = ShareItem(url: tempURL)
             return
         }
 

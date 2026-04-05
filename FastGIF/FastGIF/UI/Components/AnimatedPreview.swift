@@ -1,8 +1,12 @@
 import SwiftUI
 
 /// Animates through frames at their natural timing — the live preview.
+/// Shows WYSIWYG processed frames when available, raw frames otherwise.
 struct AnimatedPreview: View {
     let frames: [Frame]
+    var isLoading = false
+    var loadingProgress: Double = 0
+    var onTimeUpdate: ((Double) -> Void)?
     @State private var currentIndex = 0
     @State private var timer: Timer?
 
@@ -12,6 +16,16 @@ struct AnimatedPreview: View {
                 Image(decorative: frame.image, scale: 1)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
+                    .accessibilityLabel("Preview, frame \(currentIndex + 1) of \(frames.count)")
+            } else if isLoading {
+                VStack(spacing: Theme.spacing16) {
+                    ProgressView(value: loadingProgress)
+                        .tint(Theme.accent)
+                        .frame(maxWidth: 160)
+                    Text("Importing\u{2026}")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
             } else {
                 ContentUnavailableView("No Frames", systemImage: "photo.stack")
             }
@@ -36,8 +50,13 @@ struct AnimatedPreview: View {
     private func scheduleNext() {
         guard let frame = frames[safe: currentIndex] else { return }
         timer = Timer.scheduledTimer(withTimeInterval: frame.delay, repeats: false) { _ in
-            currentIndex = (currentIndex + 1) % frames.count
-            scheduleNext()
+            Task { @MainActor in
+                currentIndex = (currentIndex + 1) % frames.count
+                // Report elapsed time
+                let elapsed = frames.prefix(currentIndex).reduce(0.0) { $0 + $1.delay }
+                onTimeUpdate?(elapsed)
+                scheduleNext()
+            }
         }
     }
 }

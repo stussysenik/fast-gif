@@ -1,0 +1,179 @@
+# OpenSpec Configuration — FastGIF
+# See: https://github.com/Fission-AI/OpenSpec
+
+project:
+  name: FastGIF
+  description: >
+    GPU-accelerated GIF creation app for iOS.
+    Pipeline kernel architecture, Rust NeuQuant encoding,
+    6 export formats, AI background removal, iMessage stickers.
+  version: "1.0"
+
+  # Tech stack for agent context
+  stack:
+    language: Swift 6
+    ui: SwiftUI
+    minimum_ios: "18.0"
+    minimum_xcode: "16.0"
+    state_management: "@Observable"
+    concurrency: Swift structured concurrency
+    image_processing:
+      - vImage (Accelerate)
+      - Core Image
+    video: AVFoundation + VideoToolbox
+    ai: Vision framework
+    gif_encoding: Rust FFI (fastgif-core via FastGIFCore.xcframework)
+    testing: XCTest
+    rust_crate: fastgif-core (color_quant + gif)
+
+  # LOC stats (verified)
+  stats:
+    swift_files: 20
+    app_loc: 2410
+    total_loc: 2519
+    kernel_loc: 66
+    rust_loc: 95
+
+  # Domains mapped to spec directories
+  domains:
+    kernel:
+      description: Pipeline architecture, Stage protocol, Frame model, GIFProject state
+      spec: specs/kernel/spec.md
+      source_paths:
+        - FastGIF/FastGIF/Kernel/Pipeline.swift
+        - FastGIF/FastGIF/Kernel/Frame.swift
+        - FastGIF/FastGIF/Models/GIFProject.swift
+    processing:
+      description: Image processing stages (resize, quantize, dither, filters, crop, reverse, speed, background removal)
+      spec: specs/processing/spec.md
+      source_paths:
+        - FastGIF/FastGIF/Kernel/ImageProcessing.swift
+        - FastGIF/FastGIF/Features/BackgroundRemoval/BackgroundRemoval.swift
+        - FastGIF/FastGIF/Features/Filters/FilterView.swift
+    encoding:
+      description: Multi-format export (GIF, APNG, WebP, MP4, MOV, HEIC)
+      spec: specs/encoding/spec.md
+      source_paths:
+        - FastGIF/FastGIF/Kernel/Encoder.swift
+    rust-core:
+      description: Rust FFI library for NeuQuant GIF encoding
+      spec: specs/rust-core/spec.md
+      source_paths:
+        - rust/fastgif-core/src/lib.rs
+        - rust/fastgif-core/Cargo.toml
+        - rust/fastgif-core/include/fastgif_core.h
+    ui:
+      description: All SwiftUI views, navigation, design system
+      spec: specs/ui/spec.md
+      source_paths:
+        - FastGIF/FastGIF/ContentView.swift
+        - FastGIF/FastGIF/FastGIFApp.swift
+        - FastGIF/FastGIF/Features/Import/ImportView.swift
+        - FastGIF/FastGIF/Features/Editor/EditorView.swift
+        - FastGIF/FastGIF/Features/Editor/TrimView.swift
+        - FastGIF/FastGIF/Features/Export/ExportView.swift
+        - FastGIF/FastGIF/Features/Batch/BatchView.swift
+        - FastGIF/FastGIF/Features/Palette/PaletteView.swift
+        - FastGIF/FastGIF/Features/Stickers/StickerWizardView.swift
+        - FastGIF/FastGIF/Features/Stickers/StickerOptimizer.swift
+        - FastGIF/FastGIF/UI/Theme.swift
+        - FastGIF/FastGIF/UI/Components/AnimatedPreview.swift
+
+# Commands agents should use (Addy Osmani core area #1)
+commands:
+  build: "xcodebuild -project FastGIF/FastGIF.xcodeproj -scheme FastGIF -destination 'platform=iOS Simulator,name=iPhone 16 Pro' build"
+  test: "xcodebuild -project FastGIF/FastGIF.xcodeproj -scheme FastGIF -destination 'platform=iOS Simulator,name=iPhone 16 Pro' test"
+  clean: "xcodebuild -project FastGIF/FastGIF.xcodeproj -scheme FastGIF clean"
+  rust_build: "cd rust && bash build-ios.sh"
+  rust_check: "cd rust/fastgif-core && cargo check"
+  loc: "find FastGIF/FastGIF -name '*.swift' -not -path '*/Tests/*' | xargs wc -l"
+
+# Code style preferences (Addy Osmani core area #4)
+code_style:
+  architecture: Pipeline kernel — every feature is a Stage
+  state: "@Observable classes on @MainActor, zero Combine"
+  naming:
+    protocols: PascalCase (Stage, not StageProtocol)
+    stages: PascalCase nouns (Resize, Quantize, Dither)
+    views: PascalCase with View suffix (EditorView, ExportView)
+    models: PascalCase (Frame, GIFDocument, GIFProject)
+    enums: PascalCase cases (FilterPreset.chrome, DitherAlgorithm.floydSteinberg)
+  spacing: 4pt grid via Theme constants
+  concurrency: async/await with Task.checkCancellation() in every stage loop
+  memory: autoreleasepool in per-frame processing loops, defer for cleanup
+  example: |
+    // Every processing stage follows this contract:
+    struct MyStage: Stage {
+        func process(_ frames: [Frame]) async throws -> [Frame] {
+            var result = [Frame]()
+            result.reserveCapacity(frames.count)
+            for frame in frames {
+                let processed: Frame = autoreleasepool {
+                    // transform frame.image via Core Image / vImage
+                    return Frame(image: transformedImage, delay: frame.delay)
+                }
+                result.append(processed)
+                await Task.yield()
+            }
+            return result
+        }
+    }
+
+# Testing strategy (Addy Osmani core area #3)
+testing:
+  framework: XCTest
+  locations:
+    unit: FastGIF/FastGIFTests/
+    ui: FastGIF/FastGIFUITests/
+  expectations:
+    unit_coverage_target: 80%
+    pipeline_stages: Every Stage must have at least one test
+    encoding: Every ExportFormat must have at least one test
+    regression: Bug fixes must include a failing test case
+  levels:
+    unit: "Individual Stage.process() calls, Decoder methods, Encoder methods"
+    integration: "Full Pipeline.run() with multiple stages, import → export round-trips"
+    ui: "Maestro flows in maestro/flows/"
+  e2e_tool: Maestro
+
+# Three-tier boundaries (Addy Osmani core area #6)
+boundaries:
+  always:
+    - Run xcodebuild build before declaring work complete
+    - Every new feature must be expressible as a Stage
+    - Check Task.checkCancellation() in any loop over frames
+    - Use autoreleasepool in per-frame processing
+    - Follow Theme constants for all UI values
+    - Commit spec changes alongside code changes
+
+  ask_first:
+    - Adding new Swift Package Manager dependencies
+    - Modifying the Stage protocol signature
+    - Changing the Pipeline.run() cancellation logic
+    - Adding new ExportFormat cases
+    - Modifying the Rust FFI interface (fastgif_core.h)
+    - Changing CI/build configuration
+
+  never:
+    - Commit secrets, API keys, or provisioning profiles
+    - Remove a failing test without replacing it
+    - Modify FastGIFCore.xcframework binary directly (use rust/build-ios.sh)
+    - Add CocoaPods or alternative dependency managers
+    - Use Combine or @Published (project uses @Observable exclusively)
+    - Commit generated Xcode project user data (xcuserdata)
+
+# External references
+references:
+  spec_frameworks:
+    - name: OpenSpec (Fission-AI)
+      url: https://github.com/Fission-AI/OpenSpec
+      usage: Spec-driven development with delta specs and change proposals
+    - name: Agent Skills (Addy Osmani)
+      url: https://github.com/addyosmani/agent-skills
+      usage: Production-grade engineering skills for AI coding agents
+    - name: Swift Agent Skills (twostraws)
+      url: https://github.com/twostraws/swift-agent-skills
+      usage: Curated Swift/iOS agent skills collection
+  design_inspiration:
+    - iA Writer (progressive disclosure, typographic focus)
+    - Things (radical simplicity, layered complexity)

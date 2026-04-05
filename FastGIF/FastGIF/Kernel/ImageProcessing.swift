@@ -10,12 +10,17 @@ struct Resize: Stage {
     let targetSize: CGSize
 
     func process(_ frames: [Frame]) async throws -> [Frame] {
-        try frames.map { frame in
-            guard let resized = resize(frame.image, to: targetSize) else {
-                throw ProcessingError.resizeFailed
+        var result = [Frame]()
+        result.reserveCapacity(frames.count)
+        for frame in frames {
+            let resized: CGImage? = autoreleasepool {
+                resize(frame.image, to: targetSize)
             }
-            return Frame(image: resized, delay: frame.delay)
+            guard let resized else { throw ProcessingError.resizeFailed }
+            result.append(Frame(image: resized, delay: frame.delay))
+            await Task.yield()
         }
+        return result
     }
 
     private func resize(_ image: CGImage, to size: CGSize) -> CGImage? {
@@ -58,21 +63,23 @@ struct Quantize: Stage {
 
     func process(_ frames: [Frame]) async throws -> [Frame] {
         let context = CIContext(options: [.useSoftwareRenderer: false])
-        return frames.map { frame in
-            let ci = CIImage(cgImage: frame.image)
-            guard let filter = CIFilter(name: "CIColorPosterize") else {
-                return frame
+        let levels = NSNumber(value: max(2, Int(log2(Double(colors)))))
+        var result = [Frame]()
+        result.reserveCapacity(frames.count)
+        for frame in frames {
+            let processed: Frame = autoreleasepool {
+                let ci = CIImage(cgImage: frame.image)
+                guard let filter = CIFilter(name: "CIColorPosterize") else { return frame }
+                filter.setValue(ci, forKey: kCIInputImageKey)
+                filter.setValue(levels, forKey: "inputLevels")
+                guard let output = filter.outputImage,
+                      let cgImage = context.createCGImage(output, from: output.extent) else { return frame }
+                return Frame(image: cgImage, delay: frame.delay)
             }
-            filter.setValue(ci, forKey: kCIInputImageKey)
-            let levels = max(2, Int(log2(Double(colors))))
-            filter.setValue(NSNumber(value: levels), forKey: "inputLevels")
-
-            guard let output = filter.outputImage,
-                  let cgImage = context.createCGImage(output, from: output.extent) else {
-                return frame
-            }
-            return Frame(image: cgImage, delay: frame.delay)
+            result.append(processed)
+            await Task.yield()
         }
+        return result
     }
 }
 
@@ -98,30 +105,31 @@ struct Dither: Stage {
     func process(_ frames: [Frame]) async throws -> [Frame] {
         guard algorithm != .none else { return frames }
         let context = CIContext(options: [.useSoftwareRenderer: false])
-        return frames.map { frame in
-            let ci = CIImage(cgImage: frame.image)
-            guard let noise = CIFilter(name: "CIRandomGenerator") else {
-                return frame
-            }
-
-            guard let noiseOutput = noise.outputImage else { return frame }
-            let noiseImage = noiseOutput
-                .cropped(to: ci.extent)
-                .applyingFilter("CIColorMatrix", parameters: [
-                    "inputRVector": CIVector(x: CGFloat(strength * 0.05), y: 0, z: 0, w: 0),
-                    "inputGVector": CIVector(x: 0, y: CGFloat(strength * 0.05), z: 0, w: 0),
-                    "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(strength * 0.05), w: 0)
+        let s = strength
+        var result = [Frame]()
+        result.reserveCapacity(frames.count)
+        for frame in frames {
+            let processed: Frame = autoreleasepool {
+                let ci = CIImage(cgImage: frame.image)
+                guard let noise = CIFilter(name: "CIRandomGenerator"),
+                      let noiseOutput = noise.outputImage else { return frame }
+                let noiseImage = noiseOutput
+                    .cropped(to: ci.extent)
+                    .applyingFilter("CIColorMatrix", parameters: [
+                        "inputRVector": CIVector(x: CGFloat(s * 0.05), y: 0, z: 0, w: 0),
+                        "inputGVector": CIVector(x: 0, y: CGFloat(s * 0.05), z: 0, w: 0),
+                        "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(s * 0.05), w: 0)
+                    ])
+                let dithered = ci.applyingFilter("CIAdditionCompositing", parameters: [
+                    kCIInputBackgroundImageKey: noiseImage
                 ])
-
-            let dithered = ci.applyingFilter("CIAdditionCompositing", parameters: [
-                kCIInputBackgroundImageKey: noiseImage
-            ])
-
-            guard let cgImage = context.createCGImage(dithered, from: dithered.extent) else {
-                return frame
+                guard let cgImage = context.createCGImage(dithered, from: dithered.extent) else { return frame }
+                return Frame(image: cgImage, delay: frame.delay)
             }
-            return Frame(image: cgImage, delay: frame.delay)
+            result.append(processed)
+            await Task.yield()
         }
+        return result
     }
 }
 
@@ -131,14 +139,21 @@ struct FilterStage: Stage {
 
     func process(_ frames: [Frame]) async throws -> [Frame] {
         let context = CIContext(options: [.useSoftwareRenderer: false])
-        return frames.compactMap { frame in
-            var ci = CIImage(cgImage: frame.image)
-            for f in filters {
-                ci = ci.applyingFilter(f.name, parameters: f.params)
+        var result = [Frame]()
+        result.reserveCapacity(frames.count)
+        for frame in frames {
+            let processed: Frame? = autoreleasepool {
+                var ci = CIImage(cgImage: frame.image)
+                for f in filters {
+                    ci = ci.applyingFilter(f.name, parameters: f.params)
+                }
+                guard let cgImage = context.createCGImage(ci, from: ci.extent) else { return nil }
+                return Frame(image: cgImage, delay: frame.delay)
             }
-            guard let cgImage = context.createCGImage(ci, from: ci.extent) else { return nil }
-            return Frame(image: cgImage, delay: frame.delay)
+            if let processed { result.append(processed) }
+            await Task.yield()
         }
+        return result
     }
 }
 

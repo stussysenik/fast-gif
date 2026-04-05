@@ -32,39 +32,60 @@ enum Decoder {
 
     // MARK: - Video (Hardware-accelerated via AVFoundation)
 
-    static func decodeVideo(url: URL, fps: Double = 10) async throws -> [Frame] {
+    static func decodeVideo(url: URL, fps: Double = 10, startTime: Double = 0, endTime: Double? = nil, maxDimension: CGFloat = 640, progress: (@Sendable (Double) -> Void)? = nil) async throws -> [Frame] {
         let asset = AVURLAsset(url: url)
         let duration = try await asset.load(.duration)
         let track = try await asset.loadTracks(withMediaType: .video).first
         guard let track else { throw DecoderError.noVideoTrack }
 
-        let size = try await track.load(.naturalSize)
+        let naturalSize = try await track.load(.naturalSize)
+        // Cap resolution to prevent memory death on 4K+ video
+        let scale = min(1.0, maxDimension / max(naturalSize.width, naturalSize.height))
+        let outputWidth = max(1, Int(naturalSize.width * scale))
+        let outputHeight = max(1, Int(naturalSize.height * scale))
+
         let reader = try AVAssetReader(asset: asset)
+        let totalSeconds = CMTimeGetSeconds(duration)
+        let effectiveEnd = min(endTime ?? totalSeconds, totalSeconds)
+        let start = CMTime(seconds: startTime, preferredTimescale: 600)
+        let end = CMTime(seconds: effectiveEnd, preferredTimescale: 600)
+        reader.timeRange = CMTimeRange(start: start, end: end)
+
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: Int(size.width),
-            kCVPixelBufferHeightKey as String: Int(size.height)
+            kCVPixelBufferWidthKey as String: outputWidth,
+            kCVPixelBufferHeightKey as String: outputHeight
         ])
         output.alwaysCopiesSampleData = false
         reader.add(output)
         reader.startReading()
 
+        let context = CIContext(options: [.useSoftwareRenderer: false])
         let frameDuration = 1.0 / fps
-        let totalSeconds = CMTimeGetSeconds(duration)
+        let estimatedFrames = max(1, Int((effectiveEnd - startTime) * fps))
         var frames: [Frame] = []
-        var nextTime: Double = 0
+        frames.reserveCapacity(estimatedFrames)
+        var nextTime: Double = startTime
+        var frameCount = 0
 
         while let buffer = output.copyNextSampleBuffer() {
             let time = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(buffer))
             guard time >= nextTime else { continue }
             nextTime = time + frameDuration
 
-            if let pixelBuffer = CMSampleBufferGetImageBuffer(buffer) {
-                let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-                let context = CIContext(options: [.useSoftwareRenderer: false])
-                if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
-                    frames.append(Frame(image: cgImage, delay: frameDuration))
+            autoreleasepool {
+                if let pixelBuffer = CMSampleBufferGetImageBuffer(buffer) {
+                    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+                    if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
+                        frames.append(Frame(image: cgImage, delay: frameDuration))
+                    }
                 }
+            }
+            frameCount += 1
+            progress?(min(Double(frameCount) / Double(estimatedFrames), 1.0))
+
+            if frameCount.isMultiple(of: 10) {
+                await Task.yield()
             }
             try Task.checkCancellation()
         }

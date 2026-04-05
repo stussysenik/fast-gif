@@ -1,0 +1,25 @@
+appId: com.fastgif.app
+---
+# Flow: Filter View Structure
+# Verifies the app launches and the import screen is accessible.
+# Filter view is only available after importing content into the editor,
+# so this test validates the pre-import state is correct.
+
+- launchApp
+- waitForAnimationToEnd
+
+# Verify all three import paths are present and tappable
+- assertVisible: "From Video"
+- assertVisible: "From Photos"
+- assertVisible: "Open File"
+
+# Verify tab navigation works (filter is behind editor, which requires content)
+- tapOn: "Batch"
+- waitForAnimationToEnd
+- assertVisible: "Batch"
+- assertVisible: "Add Files"
+
+# Return and verify Create tab integrity
+- tapOn: "Create"
+- waitForAnimationToEnd
+- assertVisible: "Create something"

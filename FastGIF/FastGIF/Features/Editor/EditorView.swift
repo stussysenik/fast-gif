@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The heart of the app — frame editor with timeline.
+/// The heart of the app — WYSIWYG editor.
 /// iA Writer principle: focused editing surface, controls reveal on demand.
 struct EditorView: View {
     @Bindable var project: GIFProject
@@ -11,17 +11,30 @@ struct EditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Preview area
-            AnimatedPreview(frames: project.frames)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMedium))
-                .padding(Theme.spacing16)
-                .onTapGesture { showControls.toggle() }
+            // WYSIWYG Preview — shows processed output
+            AnimatedPreview(
+                frames: project.previewFrames.isEmpty ? project.frames : project.previewFrames,
+                isLoading: project.isImporting,
+                loadingProgress: project.importProgress
+            ) { time in
+                project.currentTime = time
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMedium))
+            .padding(Theme.spacing16)
+            .onTapGesture { showControls.toggle() }
 
-            // Timeline
-            TimelineView(project: project)
-                .frame(height: 80)
+            // Trim bar — only when a video source is available
+            if project.sourceVideoURL != nil {
+                TrimView(project: project) {
+                    project.scheduleRetrim()
+                }
+            }
+
+            // Time ruler — replaces frame thumbnails
+            TimeScrubber(project: project)
+                .frame(height: 56)
 
             // Controls bar
             if showControls {
@@ -68,64 +81,86 @@ struct EditorView: View {
             if project.isProcessing {
                 ProcessingOverlay(
                     progress: project.progress,
-                    message: "Processing..."
+                    message: "Processing\u{2026}"
                 )
             }
         }
     }
 }
 
-/// Horizontal scrolling frame timeline.
-struct TimelineView: View {
+/// Time-based scrubber — precise time ruler with current position.
+/// Replaces frame thumbnails for a cleaner, more intuitive interface.
+struct TimeScrubber: View {
     @Bindable var project: GIFProject
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: Theme.spacing4) {
-                ForEach(Array(project.frames.enumerated()), id: \.element.id) { index, frame in
-                    FrameThumbnail(
-                        frame: frame,
-                        isSelected: project.selectedFrameIndex == index,
-                        index: index
-                    )
-                    .onTapGesture { project.selectedFrameIndex = index }
-                    .contextMenu {
-                        Button("Duplicate", systemImage: "plus.square.on.square") {
-                            project.duplicateFrame(at: index)
-                        }
-                        Button("Delete", systemImage: "trash", role: .destructive) {
-                            project.deleteFrame(at: index)
-                        }
-                    }
-                }
+        VStack(spacing: Theme.spacing4) {
+            // Time display
+            HStack {
+                Text(formatTime(project.currentTime))
+                    .font(.system(size: 13, design: .monospaced).weight(.medium))
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Text("\(project.frames.count) frames")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.textTertiary)
+                Spacer()
+                Text(formatTime(project.totalDuration))
+                    .font(.system(size: 13, design: .monospaced).weight(.medium))
+                    .foregroundStyle(Theme.textSecondary)
             }
             .padding(.horizontal, Theme.spacing16)
-        }
-        .background(Theme.surface)
-    }
-}
 
-struct FrameThumbnail: View {
-    let frame: Frame
-    let isSelected: Bool
-    let index: Int
+            // Scrub bar
+            GeometryReader { geo in
+                let width = geo.size.width
+                let fraction = project.totalDuration > 0
+                    ? project.currentTime / project.totalDuration
+                    : 0
 
-    var body: some View {
-        VStack(spacing: Theme.spacing2) {
-            Image(decorative: frame.image, scale: 1)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 52, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.radiusSmall))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.radiusSmall)
-                        .stroke(isSelected ? Theme.accent : .clear, lineWidth: 2)
+                ZStack(alignment: .leading) {
+                    // Track
+                    Capsule()
+                        .fill(Theme.surface)
+                        .frame(height: 6)
+
+                    // Progress
+                    Capsule()
+                        .fill(Theme.accent)
+                        .frame(width: max(6, CGFloat(fraction) * width), height: 6)
+
+                    // Playhead
+                    Circle()
+                        .fill(Theme.accent)
+                        .frame(width: 14, height: 14)
+                        .shadow(color: Theme.accent.opacity(0.3), radius: 4)
+                        .offset(x: CGFloat(fraction) * (width - 14))
+                }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            let frac = max(0, min(value.location.x / width, 1))
+                            project.currentTime = frac * project.totalDuration
+                        }
                 )
-
-            Text("\(Int(frame.delay * 1000))ms")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(Theme.textTertiary)
+            }
+            .frame(height: 14)
+            .padding(.horizontal, Theme.spacing16)
         }
+        .padding(.vertical, Theme.spacing8)
+        .background(Theme.surface)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Timeline")
+        .accessibilityValue("\(formatTime(project.currentTime)) of \(formatTime(project.totalDuration))")
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        let s = Int(seconds)
+        let ms = Int((seconds.truncatingRemainder(dividingBy: 1)) * 10)
+        return s >= 60
+            ? String(format: "%d:%02d.%d", s / 60, s % 60, ms)
+            : String(format: "%d.%ds", s, ms)
     }
 }
 
@@ -141,6 +176,8 @@ struct ControlsBar: View {
                     Text("Speed").sectionHeader()
                     Slider(value: $project.speed, in: 0.1...5.0)
                         .frame(width: 120)
+                        .accessibilityLabel("Playback speed")
+                        .accessibilityValue("\(project.speed, specifier: "%.1f")x")
                     Text("\(project.speed, specifier: "%.1f")x")
                         .font(.caption2.monospaced())
                 }
@@ -150,7 +187,7 @@ struct ControlsBar: View {
                 // Colors
                 VStack(alignment: .leading, spacing: Theme.spacing4) {
                     Text("Colors").sectionHeader()
-                    Picker("", selection: $project.quantizeColors) {
+                    Picker("Color count", selection: $project.quantizeColors) {
                         Text("16").tag(16)
                         Text("32").tag(32)
                         Text("64").tag(64)
@@ -166,7 +203,7 @@ struct ControlsBar: View {
                 // Dither
                 VStack(alignment: .leading, spacing: Theme.spacing4) {
                     Text("Dither").sectionHeader()
-                    Picker("", selection: $project.ditherAlgorithm) {
+                    Picker("Dither algorithm", selection: $project.ditherAlgorithm) {
                         ForEach(DitherAlgorithm.allCases) { algo in
                             Text(algo.rawValue).tag(algo)
                         }

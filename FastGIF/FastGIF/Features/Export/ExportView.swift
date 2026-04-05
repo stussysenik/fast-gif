@@ -1,27 +1,33 @@
 import SwiftUI
+import Photos
 
-/// Multi-format export with size comparison — one tap, all formats.
+/// Multi-format export — save to Photos or share.
 struct ExportView: View {
     @Bindable var project: GIFProject
-    @State private var exportedData: Data?
-    @State private var exportResults: [(ExportFormat, Int)] = []
-    @State private var showShareSheet = false
+    @State private var estimatedSize: Int?
     @State private var showStickerWizard = false
+    @State private var exportError: String?
+    @State private var exportSuccess = false
+    @State private var shareItem: ShareItem?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
-                // Format picker
                 Section {
                     ForEach(ExportFormat.allCases) { format in
                         HStack {
                             Label(format.displayName, systemImage: iconForFormat(format))
                             Spacer()
-                            if let size = exportResults.first(where: { $0.0 == format })?.1 {
+                            if format == project.exportFormat, let size = estimatedSize {
                                 Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
                                     .font(.caption.monospaced())
                                     .foregroundStyle(Theme.textSecondary)
+                            }
+                            if format == .webp || format == .heic {
+                                Text("Static")
+                                    .font(.caption2)
+                                    .foregroundStyle(Theme.textTertiary)
                             }
                             if project.exportFormat == format {
                                 Image(systemName: "checkmark")
@@ -29,50 +35,75 @@ struct ExportView: View {
                             }
                         }
                         .contentShape(Rectangle())
-                        .onTapGesture { project.exportFormat = format }
+                        .onTapGesture {
+                            project.exportFormat = format
+                            estimatedSize = nil
+                        }
                     }
                 } header: {
                     Text("Format")
                 }
 
-                // Settings
                 Section {
-                    Stepper("Loop: \(project.loopCount == 0 ? "∞" : "\(project.loopCount)")",
+                    Stepper("Loop: \(project.loopCount == 0 ? "\u{221E}" : "\(project.loopCount)")",
                             value: $project.loopCount, in: 0...100)
-
-                    if let width = project.frames.first?.width {
-                        HStack {
-                            Text("Max Width")
-                            Spacer()
-                            Text("\(project.maxWidth.map { "\(Int($0))px" } ?? "\(width)px (original)")")
-                                .foregroundStyle(Theme.textSecondary)
-                        }
-                    }
                 } header: {
                     Text("Settings")
                 }
 
-                // iMessage Stickers
                 Section {
-                    Button {
-                        showStickerWizard = true
-                    } label: {
+                    Button { showStickerWizard = true } label: {
                         Label("iMessage Sticker Wizard", systemImage: "message.badge.waveform")
                     }
                 } header: {
                     Text("Stickers")
                 }
 
-                // Export button
+                if let exportError {
+                    Section {
+                        Label(exportError, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(Theme.destructive)
+                            .font(.caption)
+                    }
+                }
+
+                if exportSuccess {
+                    Section {
+                        Label("Saved to Photos", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.success)
+                    }
+                }
+
+                // Primary: Save to Photos
                 Section {
+                    Button {
+                        Task { await saveToPhotos() }
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if project.isProcessing {
+                                ProgressView(value: project.progress)
+                                    .frame(width: 120)
+                                Text("\(Int(project.progress * 100))%")
+                                    .font(.caption.monospaced())
+                            } else {
+                                Label("Save to Photos",
+                                      systemImage: "photo.on.rectangle.angled")
+                                    .font(.headline)
+                            }
+                            Spacer()
+                        }
+                    }
+                    .disabled(project.isProcessing || !project.hasFrames)
+
+                    // Secondary: Share
                     Button {
                         Task { await exportAndShare() }
                     } label: {
                         HStack {
                             Spacer()
-                            Label("Export \(project.exportFormat.displayName)",
+                            Label("Share \(project.exportFormat.displayName)",
                                   systemImage: "square.and.arrow.up")
-                                .font(.headline)
                             Spacer()
                         }
                     }
@@ -89,45 +120,66 @@ struct ExportView: View {
             .sheet(isPresented: $showStickerWizard) {
                 StickerWizardView(project: project)
             }
-            .task { await estimateSizes() }
+            .sheet(item: $shareItem) { item in
+                ActivityView(url: item.url)
+            }
+            .task(id: project.exportFormat) { await estimateSize() }
         }
     }
 
-    private func estimateSizes() async {
+    private func estimateSize() async {
         guard project.hasFrames else { return }
+        estimatedSize = nil
         let pipeline = project.buildPipeline()
-        guard let processed = try? await pipeline.run(project.frames) else { return }
-
-        // Estimate the currently selected format first so the UI is responsive immediately.
-        let selected = project.exportFormat
-        if let data = try? await Encoder.encode(frames: processed, format: selected) {
-            exportResults.append((selected, data.count))
+        let frames = project.frames
+        let fmt = project.exportFormat
+        guard let processed = try? await pipeline.run(frames) else { return }
+        if let data = try? await Encoder.encode(frames: processed, format: fmt) {
+            estimatedSize = data.count
         }
+    }
 
-        // Lazily estimate the remaining formats in the background.
-        for format in ExportFormat.allCases where format != selected {
-            if let data = try? await Encoder.encode(frames: processed, format: format) {
-                exportResults.append((format, data.count))
+    private func saveToPhotos() async {
+        exportError = nil
+        exportSuccess = false
+        do {
+            let data = try await project.export()
+            let ext = project.exportFormat.fileExtension
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension(ext)
+            try data.write(to: tempURL)
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard status == .authorized || status == .limited else {
+                exportError = "Photo library access denied. Enable in Settings."
+                return
             }
+
+            try await PHPhotoLibrary.shared().performChanges {
+                let request = PHAssetCreationRequest.forAsset()
+                let resourceType: PHAssetResourceType =
+                    (project.exportFormat == .mp4 || project.exportFormat == .mov) ? .video : .photo
+                request.addResource(with: resourceType, fileURL: tempURL, options: nil)
+            }
+            exportSuccess = true
+        } catch {
+            exportError = error.localizedDescription
         }
     }
 
     private func exportAndShare() async {
-        guard let data = try? await project.export() else { return }
-        exportedData = data
-
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FastGIF-export")
-            .appendingPathExtension(project.exportFormat.fileExtension)
-        try? data.write(to: tempURL)
-
-        // Share via UIActivityViewController — must present on the main thread.
-        let activityVC = UIActivityViewController(activityItems: [tempURL], applicationActivities: nil)
-        await MainActor.run {
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let root = windowScene.windows.first?.rootViewController {
-                root.present(activityVC, animated: true)
-            }
+        exportError = nil
+        do {
+            let data = try await project.export()
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("FastGIF-\(UUID().uuidString)")
+                .appendingPathExtension(project.exportFormat.fileExtension)
+            try data.write(to: tempURL)
+            shareItem = ShareItem(url: tempURL)
+        } catch {
+            exportError = error.localizedDescription
         }
     }
 
@@ -140,4 +192,20 @@ struct ExportView: View {
         case .heic: "square.stack.3d.up"
         }
     }
+}
+
+/// Identifiable wrapper for share sheet item (unique ID per export).
+struct ShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+/// UIKit share sheet wrapper.
+struct ActivityView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
