@@ -1,5 +1,6 @@
 import SwiftUI
 import PhotosUI
+import UIKit
 
 /// The entry point — import from camera roll, video, or files.
 struct ImportView: View {
@@ -83,13 +84,9 @@ struct ImportView: View {
             var images: [CGImage] = []
             for item in items {
                 if let data = try? await item.loadTransferable(type: Data.self),
-                   let provider = CGDataProvider(data: data as CFData),
-                   let image = CGImage(
-                       pngDataProviderSource: provider,
-                       decode: nil, shouldInterpolate: true,
-                       intent: .defaultIntent
-                   ) {
-                    images.append(image)
+                   let uiImage = UIImage(data: data),
+                   let cgImage = uiImage.cgImage {
+                    images.append(cgImage)
                 }
             }
             if !images.isEmpty {
