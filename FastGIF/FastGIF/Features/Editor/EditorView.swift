@@ -6,6 +6,8 @@ struct EditorView: View {
     @Bindable var project: GIFProject
     @State private var showControls = false
     @State private var showExport = false
+    @State private var showPalette = false
+    @State private var showFilters = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,6 +38,18 @@ struct EditorView: View {
                 .disabled(!project.hasFrames)
             }
             ToolbarItem(placement: .topBarTrailing) {
+                Button("Filters", systemImage: "camera.filters") {
+                    showFilters = true
+                }
+                .disabled(!project.hasFrames)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Palette", systemImage: "paintpalette") {
+                    showPalette = true
+                }
+                .disabled(!project.hasFrames)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Button("Controls", systemImage: "slider.horizontal.3") {
                     showControls.toggle()
                 }
@@ -43,6 +57,12 @@ struct EditorView: View {
         }
         .sheet(isPresented: $showExport) {
             ExportView(project: project)
+        }
+        .sheet(isPresented: $showPalette) {
+            PaletteView(project: project)
+        }
+        .sheet(isPresented: $showFilters) {
+            FilterView(project: project)
         }
         .overlay {
             if project.isProcessing {
