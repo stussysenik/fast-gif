@@ -1,0 +1,20 @@
+appId: com.fastgif.app
+---
+# Flow: App Launch & Import Screen Verification
+# Verifies the app launches cleanly and shows the expected import screen
+# with all three import buttons and both tab bar items.
+
+- launchApp
+- waitForAnimationToEnd
+
+# Verify the import screen headline is visible
+- assertVisible: "Create something"
+
+# Verify all three import buttons are present
+- assertVisible: "From Video"
+- assertVisible: "From Photos"
+- assertVisible: "Open File"
+
+# Verify tab bar shows both tabs
+- assertVisible: "Create"
+- assertVisible: "Batch"

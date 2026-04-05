@@ -1,0 +1,29 @@
+appId: com.fastgif.app
+---
+# Flow: Tab Navigation
+# Tests switching between the Create and Batch tabs, verifying the
+# correct content is shown for each tab.
+
+- launchApp
+- waitForAnimationToEnd
+
+# Confirm we start on the Create tab (import screen visible)
+- assertVisible: "Create something"
+
+# Switch to Batch tab
+- tapOn: "Batch"
+- waitForAnimationToEnd
+
+# Verify Batch tab content is shown
+- assertVisible: "Batch"
+- assertVisible: "Add Files"
+
+# Switch back to Create tab
+- tapOn: "Create"
+- waitForAnimationToEnd
+
+# Confirm Create tab content is restored
+- assertVisible: "Create something"
+- assertVisible: "From Video"
+- assertVisible: "From Photos"
+- assertVisible: "Open File"

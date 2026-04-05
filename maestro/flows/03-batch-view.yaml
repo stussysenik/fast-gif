@@ -1,0 +1,27 @@
+appId: com.fastgif.app
+---
+# Flow: Batch View UI Verification
+# Navigates to the Batch tab and verifies the expected UI elements are
+# present — Add Files button, section header, and navigation title.
+
+- launchApp
+- waitForAnimationToEnd
+
+# Navigate to Batch tab
+- tapOn:
+    text: "Batch"
+    retryTapIfNoChange: true
+- waitForAnimationToEnd
+
+# Verify navigation title
+- assertVisible: "Batch"
+
+# Verify the Input section header is visible (shows "Input (0 files)")
+- assertVisible: "Input (0 files)"
+
+# Verify Add Files button is present
+- assertVisible: "Add Files"
+
+# The format picker and settings section only appear after files are added,
+# so we verify only the initially-visible elements here.
+# See 03-batch-with-files.yaml for post-import assertions.

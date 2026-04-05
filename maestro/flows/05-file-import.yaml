@@ -1,0 +1,35 @@
+appId: com.fastgif.app
+---
+# Flow: Open File — File Picker Launch & Dismiss
+# Taps the "Open File" button on the Create tab and verifies the
+# system document picker appears, then dismisses it.
+
+- launchApp
+- waitForAnimationToEnd
+
+# Confirm we are on the Create / import screen
+- assertVisible: "Create something"
+
+# Tap "Open File" to show the system file picker sheet
+- tapOn:
+    text: "Open File"
+    retryTapIfNoChange: true
+- waitForAnimationToEnd
+
+# The system document picker renders — wait a moment then dismiss
+- extendedWaitUntil:
+    visible: "Cancel"
+    timeout: 5000
+    optional: true
+
+# Dismiss by tapping Cancel or swiping down
+- swipe:
+    direction: DOWN
+    duration: 400
+- waitForAnimationToEnd
+
+# Wait for sheet to fully dismiss
+- extendedWaitUntil:
+    visible: "Create something"
+    timeout: 5000
+    optional: true

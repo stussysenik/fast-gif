@@ -1,0 +1,31 @@
+appId: com.fastgif.app
+---
+# Flow: From Photos — Photo Picker Launch & Dismiss
+# Taps the "From Photos" button on the Create tab and verifies the
+# system photo picker sheet appears, then dismisses it.
+
+- launchApp
+- waitForAnimationToEnd
+
+# Confirm we are on the Create / import screen
+- assertVisible: "Create something"
+
+# Tap "From Photos" to trigger the system PhotosPicker sheet
+- tapOn:
+    text: "From Photos"
+    retryTapIfNoChange: true
+- waitForAnimationToEnd
+
+# The system Photos picker presents as a sheet.
+# Verify the picker is on screen by checking for a recognisable
+# element that iOS always renders inside the Photos picker sheet.
+- assertVisible: "Photos"
+
+# Dismiss the sheet by swiping it down
+- swipe:
+    direction: DOWN
+    duration: 400
+- waitForAnimationToEnd
+
+# Confirm we are back on the import screen
+- assertVisible: "Create something"
