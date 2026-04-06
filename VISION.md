@@ -46,7 +46,7 @@ The pipeline kernel — `Source → Decode → Process → Encode → Export` �
 - **The kernel should be expressible in a single protocol.** If it takes more, the abstraction is wrong.
 - **Modules are Lego blocks.** They snap onto the pipeline. They don't know about each other.
 
-This constraint produces elegance by subtraction. The entire pipeline kernel is 66 lines. The entire app is 2,410 lines. Not because features were cut — because the architecture is honest.
+This constraint produces elegance by subtraction. The entire pipeline kernel is 66 lines. The entire app is 2,411 lines with 93 passing tests and a 135-line Rust core. Not because features were cut — because the architecture is honest.
 
 ### Spec-Driven Development
 
@@ -81,5 +81,6 @@ Builds iMessage sticker packs. Needs to fit Apple's constraints (500KB APNG, 3 s
 1. A first-time user creates and exports a GIF in under 30 seconds
 2. The same user discovers a power feature within their first session
 3. Export quality matches or exceeds Gifski on equivalent input
-4. The entire codebase fits in one senior engineer's head (~2,500 LOC)
+4. The entire codebase fits in one senior engineer's head (~2,500 LOC app + ~1,300 LOC tests)
 5. Zero Swift package dependencies — ships with platform SDKs plus a self-contained Rust static library for GIF encoding
+6. Color fidelity is verified — roundtrip encoding preserves R, G, B channels with no false color artifacts
