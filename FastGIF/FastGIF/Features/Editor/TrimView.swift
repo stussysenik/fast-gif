@@ -71,7 +71,8 @@ struct TrimView: View {
     }
 
     private var timeLabel: String {
-        "\(formatTime(project.trimStart)) – \(formatTime(effectiveEnd))"
+        let duration = effectiveEnd - project.trimStart
+        return "\(formatTime(0)) – \(formatTime(duration))"
     }
 
     private func formatTime(_ seconds: Double) -> String {

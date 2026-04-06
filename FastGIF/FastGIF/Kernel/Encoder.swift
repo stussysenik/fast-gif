@@ -61,7 +61,7 @@ enum Encoder {
                 bitsPerComponent: 8,
                 bytesPerRow: w * 4,
                 space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
             ) else {
                 buffer.deallocate()
                 continue

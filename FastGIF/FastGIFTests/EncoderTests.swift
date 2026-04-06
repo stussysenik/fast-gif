@@ -233,4 +233,92 @@ final class EncoderTests: XCTestCase {
         XCTAssertEqual(headerBytes, gifSignature,
                        "encode(.gif) should dispatch to encodeGIF and return GIF data")
     }
+
+    // MARK: - Color Fidelity Tests
+
+    func testEncodeGIFPreservesRedChannel() throws {
+        // Encode a pure red image — verify it decodes as red, not blue
+        let red = CGColor(red: 1, green: 0, blue: 0, alpha: 1)
+        let frames = [Self.makeTestFrame(width: 32, height: 32, color: red)]
+        let data = try Encoder.encodeGIF(frames: frames, colors: 256)
+
+        // Decode back and sample center pixel
+        let decoded = try Decoder.decodeImageSource(from: data)
+        XCTAssertEqual(decoded.count, 1)
+        let image = decoded[0].image
+        guard let provider = image.dataProvider, let pixelData = provider.data else {
+            XCTFail("Could not read decoded pixel data")
+            return
+        }
+        let ptr = CFDataGetBytePtr(pixelData)!
+        let bpp = image.bitsPerPixel / 8
+        let row = image.bytesPerRow
+        let cx = image.width / 2
+        let cy = image.height / 2
+        let offset = cy * row + cx * bpp
+        let r = ptr[offset]
+        let g = ptr[offset + 1]
+        let b = ptr[offset + 2]
+
+        // Red channel should dominate — no R↔B swap
+        XCTAssertGreaterThan(r, 200, "Red channel should be high for a red image, got \(r)")
+        XCTAssertLessThan(b, 55, "Blue channel should be low for a red image, got \(b)")
+        XCTAssertLessThan(g, 55, "Green channel should be low for a red image, got \(g)")
+    }
+
+    func testEncodeGIFPreservesBlueChannel() throws {
+        // Encode a pure blue image — verify it stays blue
+        let blue = CGColor(red: 0, green: 0, blue: 1, alpha: 1)
+        let frames = [Self.makeTestFrame(width: 32, height: 32, color: blue)]
+        let data = try Encoder.encodeGIF(frames: frames, colors: 256)
+
+        let decoded = try Decoder.decodeImageSource(from: data)
+        XCTAssertEqual(decoded.count, 1)
+        let image = decoded[0].image
+        guard let provider = image.dataProvider, let pixelData = provider.data else {
+            XCTFail("Could not read decoded pixel data")
+            return
+        }
+        let ptr = CFDataGetBytePtr(pixelData)!
+        let bpp = image.bitsPerPixel / 8
+        let row = image.bytesPerRow
+        let cx = image.width / 2
+        let cy = image.height / 2
+        let offset = cy * row + cx * bpp
+        let r = ptr[offset]
+        let g = ptr[offset + 1]
+        let b = ptr[offset + 2]
+
+        XCTAssertGreaterThan(b, 200, "Blue channel should be high for a blue image, got \(b)")
+        XCTAssertLessThan(r, 55, "Red channel should be low for a blue image, got \(r)")
+        XCTAssertLessThan(g, 55, "Green channel should be low for a blue image, got \(g)")
+    }
+
+    func testEncodeGIFRoundtripColorFidelity() throws {
+        // Encode a green image and verify no false color artifacts
+        let green = CGColor(red: 0, green: 1, blue: 0, alpha: 1)
+        let frames = [Self.makeTestFrame(width: 32, height: 32, color: green)]
+        let data = try Encoder.encodeGIF(frames: frames, colors: 256)
+
+        let decoded = try Decoder.decodeImageSource(from: data)
+        XCTAssertEqual(decoded.count, 1)
+        let image = decoded[0].image
+        guard let provider = image.dataProvider, let pixelData = provider.data else {
+            XCTFail("Could not read decoded pixel data")
+            return
+        }
+        let ptr = CFDataGetBytePtr(pixelData)!
+        let bpp = image.bitsPerPixel / 8
+        let row = image.bytesPerRow
+        let cx = image.width / 2
+        let cy = image.height / 2
+        let offset = cy * row + cx * bpp
+        let r = ptr[offset]
+        let g = ptr[offset + 1]
+        let b = ptr[offset + 2]
+
+        XCTAssertGreaterThan(g, 200, "Green channel should be high for a green image, got \(g)")
+        XCTAssertLessThan(r, 55, "Red channel should be low for a green image, got \(r)")
+        XCTAssertLessThan(b, 55, "Blue channel should be low for a green image, got \(b)")
+    }
 }
