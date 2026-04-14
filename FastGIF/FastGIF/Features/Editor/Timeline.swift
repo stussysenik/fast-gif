@@ -28,14 +28,21 @@ struct Timeline: View {
     let onTrimCommit: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Sub-frame ms-precision toggle. Persisted across launches so power
+    /// users keep the mode they want without re-toggling each session.
+    @AppStorage("editor.msPrecision") private var msPrecision: Bool = false
     @State private var grab: Grab?
     @State private var model: TimelineModel = .empty
 
-    /// Which handle is currently being dragged + where it started, in frames.
+    /// Which handle is currently being dragged + where it started.
+    /// In integer mode `anchorFrame` is the integer frame of the handle.
+    /// In ms mode `anchorSeconds` holds the precise time so we don't lose
+    /// sub-frame precision on each drag tick.
     private struct Grab: Equatable {
         enum Handle { case start, end, playhead }
         let handle: Handle
         let anchorFrame: Int
+        let anchorSeconds: Double
     }
 
     var body: some View {
@@ -46,6 +53,9 @@ struct Timeline: View {
             }
             .frame(height: railTotalHeight)
             footer
+            #if DEBUG
+            debugStrip
+            #endif
         }
         .padding(.horizontal, Theme.spacing16)
         .padding(.vertical, Theme.spacing12)
@@ -75,7 +85,7 @@ struct Timeline: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(formatTime(model.trimStartSeconds))
+            Text(formatTime(model.trimStartSecondsPrecise))
                 .font(.callout.monospacedDigit().weight(.medium))
                 .foregroundStyle(Theme.textPrimary)
                 .accessibilityHidden(true)
@@ -83,16 +93,16 @@ struct Timeline: View {
                 .font(.callout.weight(.medium))
                 .foregroundStyle(Theme.textTertiary)
                 .accessibilityHidden(true)
-            Text(formatTime(model.trimEndSeconds))
+            Text(formatTime(model.trimEndSecondsPrecise))
                 .font(.callout.monospacedDigit().weight(.medium))
                 .foregroundStyle(Theme.textPrimary)
                 .accessibilityHidden(true)
             Spacer()
-            Text(formatTime(model.playheadSeconds))
+            Text(formatTime(model.playheadSecondsPrecise))
                 .font(.callout.monospacedDigit().weight(.medium))
                 .foregroundStyle(Theme.accent)
                 .contentTransition(.numericText())
-                .animation(reduceMotion ? nil : Motion.tap, value: model.playheadFrame)
+                .animation(reduceMotion ? nil : Motion.tap, value: model.playheadSecondsPrecise)
                 .accessibilityHidden(true)
         }
     }
@@ -206,29 +216,72 @@ struct Timeline: View {
     private func trimDragGesture(for handle: Grab.Handle, railWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
-                let anchor = grab?.anchorFrame ?? currentFrame(for: handle)
+                let anchorFrame = grab?.anchorFrame ?? currentFrame(for: handle)
+                let anchorSeconds = grab?.anchorSeconds ?? currentSeconds(for: handle)
                 if grab == nil {
-                    grab = Grab(handle: handle, anchorFrame: anchor)
+                    grab = Grab(handle: handle, anchorFrame: anchorFrame, anchorSeconds: anchorSeconds)
                 }
-                let delta = model.frameDelta(forPixelDelta: value.translation.width, railWidth: railWidth)
-                apply(handle: handle, target: anchor + delta)
+                let target = targetSeconds(fromAnchorSeconds: anchorSeconds,
+                                           pixelDelta: value.translation.width,
+                                           railWidth: railWidth)
+                applyTarget(handle: handle, targetSeconds: target)
             }
             .onEnded { value in
                 // Velocity continuity: apply predicted residual with spring.
                 let predicted = value.predictedEndTranslation.width
                 let settled = value.translation.width
                 let residual = predicted - settled
-                let anchor = grab?.anchorFrame ?? currentFrame(for: handle)
-                let totalDelta = model.frameDelta(forPixelDelta: predicted, railWidth: railWidth)
-                let target = anchor + totalDelta
+                let anchorSeconds = grab?.anchorSeconds ?? currentSeconds(for: handle)
                 withAnimation(reduceMotion ? nil : Motion.flick) {
-                    apply(handle: handle, target: target)
+                    let target = targetSeconds(fromAnchorSeconds: anchorSeconds,
+                                               pixelDelta: predicted,
+                                               railWidth: railWidth)
+                    applyTarget(handle: handle, targetSeconds: target)
                 }
                 grab = nil
                 if abs(residual) < 1 || handle != .playhead {
                     onTrimCommit()
                 }
             }
+    }
+
+    /// Position-aware conversion of a pixel drag translation to a target
+    /// time in source seconds. Uses the current `TimelineGeometry` so the
+    /// math is warp-correct: the anchor is first mapped to its x-coordinate
+    /// under the current geometry, the drag `dx` is added in rail space,
+    /// and the inverse geometry map produces the new source time.
+    ///
+    /// For linear geometry (warp == nil) this collapses to the old formula
+    /// `anchorSeconds + dx/W × duration`. For warped geometry, the inverse
+    /// map correctly accounts for local focus scale so a handle in the
+    /// focus zone moves by the visual distance under the finger, not by
+    /// the unwarped linear distance.
+    private func targetSeconds(fromAnchorSeconds anchor: Double,
+                               pixelDelta dx: CGFloat,
+                               railWidth: CGFloat) -> Double {
+        let geo = model.geometry
+        let anchorX = geo.xPosition(forSeconds: anchor, railWidth: railWidth)
+        return geo.seconds(forX: anchorX + dx, railWidth: railWidth)
+    }
+
+    /// Apply a target time to the right handle via the model, choosing the
+    /// precise or integer mutator based on `msPrecision`. Centralises the
+    /// precise-vs-integer branch that used to live inline in the gesture.
+    private func applyTarget(handle: Grab.Handle, targetSeconds: Double) {
+        if msPrecision {
+            applyPrecise(handle: handle, targetSeconds: targetSeconds)
+        } else {
+            let targetFrame = Int((targetSeconds * Double(model.fps)).rounded())
+            apply(handle: handle, target: targetFrame)
+        }
+    }
+
+    private func currentSeconds(for handle: Grab.Handle) -> Double {
+        switch handle {
+        case .start: return model.trimStartSecondsPrecise
+        case .end: return model.trimEndSecondsPrecise
+        case .playhead: return model.playheadSecondsPrecise
+        }
     }
 
     private func playheadDragGesture(railWidth: CGFloat) -> some Gesture {
@@ -255,6 +308,22 @@ struct Timeline: View {
         case .playhead:
             m.movePlayhead(to: target)
             project.currentTime = m.playheadSeconds
+        }
+        model = m
+    }
+
+    private func applyPrecise(handle: Grab.Handle, targetSeconds: Double) {
+        var m = model
+        switch handle {
+        case .start:
+            m.moveTrimStartPrecise(toSeconds: targetSeconds)
+            project.trimStart = m.trimStartSecondsPrecise
+        case .end:
+            m.moveTrimEndPrecise(toSeconds: targetSeconds)
+            project.trimEnd = m.trimEndSecondsPrecise
+        case .playhead:
+            m.movePlayheadPrecise(toSeconds: targetSeconds)
+            project.currentTime = m.playheadSecondsPrecise
         }
         model = m
     }
@@ -305,6 +374,18 @@ struct Timeline: View {
 
     private func formatTime(_ seconds: TimeInterval) -> String {
         let clamped = max(0, seconds)
+        if msPrecision {
+            // 0.000s style — full ms precision so the user can dial frames
+            // by ear. Switches to mm:ss.mmm past 60s.
+            let whole = Int(clamped)
+            let ms = Int(((clamped - Double(whole)) * 1000).rounded())
+            if whole >= 60 {
+                let m = whole / 60
+                let s = whole % 60
+                return String(format: "%d:%02d.%03d", m, s, ms)
+            }
+            return String(format: "%d.%03ds", whole, ms)
+        }
         let whole = Int(clamped)
         let tenths = Int((clamped - Double(whole)) * 10)
         if whole >= 60 {
@@ -320,10 +401,53 @@ struct Timeline: View {
         return String(format: "%.2fs", clamped)
     }
 
+    // MARK: - Debug strip
+
+    #if DEBUG
+    /// Always-visible state strip in DEBUG builds. Surfaces the exact
+    /// frame/seconds values that feed into the geometry + fisheye warp
+    /// math, so we can verify Slice 4's behavior visually without
+    /// spelunking through logs. Stripped from Release builds.
+    @ViewBuilder
+    private var debugStrip: some View {
+        let geo = model.geometry
+        let window = model.trimWindowSeconds
+        let minDelta = model.minNeighborDeltaSeconds
+        VStack(alignment: .leading, spacing: 1) {
+            debugRow(label: "start", frame: model.trimStartFrame, seconds: model.trimStartSecondsPrecise)
+            debugRow(label: " end ", frame: model.trimEndFrame, seconds: model.trimEndSecondsPrecise)
+            debugRow(label: "head ", frame: model.playheadFrame, seconds: model.playheadSecondsPrecise)
+            Text(String(format: "trim: %.3fs  min Δ: %.3fs", window, minDelta))
+            if let warp = geo.warp {
+                Text(String(format: "warp: amount=%.2f  scale=%.1f×", warp.amount, warp.scale))
+                Text(String(format: "      focus=[%.3fs, %.3fs]", warp.focus.lowerBound, warp.focus.upperBound))
+            } else {
+                Text("warp: linear")
+            }
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .foregroundStyle(Theme.textTertiary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func debugRow(label: String, frame: Int, seconds: Double) -> some View {
+        Text(String(format: "%@  f=%04d  t=%7.4fs", label, frame, seconds))
+    }
+    #endif
+
     // MARK: - Project bridge
 
     private func refreshModel() {
-        guard let built = TimelineModel.make(from: project) else { return }
+        guard var built = TimelineModel.make(from: project) else { return }
+        // Carry sub-frame ms-precision state across rebuilds without firing
+        // haptics. The precise mutators would re-fire detent tokens on each
+        // refresh; restorePreciseFractions skips that.
+        let endSeconds = project.trimEnd ?? built.trimEndSeconds
+        built.restorePreciseFractions(
+            playheadSeconds: project.currentTime,
+            trimStartSeconds: project.trimStart,
+            trimEndSeconds: endSeconds
+        )
         model = built
     }
 }

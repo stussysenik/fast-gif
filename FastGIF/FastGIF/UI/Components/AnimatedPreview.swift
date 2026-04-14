@@ -2,10 +2,19 @@ import SwiftUI
 
 /// Animates through frames at their natural timing — the live preview.
 /// Shows WYSIWYG processed frames when available, raw frames otherwise.
+///
+/// Playback is gated by `isPlaying` — when false, the timer is invalidated
+/// and `currentIndex` freezes. Toggling true resumes from the held frame.
 struct AnimatedPreview: View {
     let frames: [Frame]
+    var isPlaying: Bool = true
     var isLoading = false
     var loadingProgress: Double = 0
+    /// WYSIWYG speed multiplier. Each frame's per-frame `delay` is divided
+    /// by this at schedule time, so changing speed is instantaneous and
+    /// never triggers a pipeline re-run. Defaults to 1.0 for callers
+    /// (e.g. StickerWizardView) that don't expose a speed control.
+    var speedMultiplier: Double = 1.0
     var onTimeUpdate: ((Double) -> Void)?
     @State private var currentIndex = 0
     @State private var timer: Timer?
@@ -30,16 +39,33 @@ struct AnimatedPreview: View {
                 ContentUnavailableView("No Frames", systemImage: "photo.stack")
             }
         }
-        .onAppear { startAnimation() }
+        .onAppear { syncPlayback() }
         .onDisappear { stopAnimation() }
         .onChange(of: frames.count) { startAnimation() }
+        .onChange(of: isPlaying) { syncPlayback() }
+        // Speed changes cancel the in-flight timer and reschedule at the
+        // new rate. Without this, the timer closure captures the old
+        // multiplier and the slider lags by up to one frame's interval.
+        .onChange(of: speedMultiplier) { syncPlayback() }
+    }
+
+    private func syncPlayback() {
+        if isPlaying {
+            // Resume from current frame instead of restarting from 0,
+            // so pause/play feels like freeze-frame, not rewind.
+            stopAnimation()
+            guard frames.count > 1 else { return }
+            scheduleNext()
+        } else {
+            stopAnimation()
+        }
     }
 
     private func startAnimation() {
         stopAnimation()
         guard frames.count > 1 else { return }
         currentIndex = 0
-        scheduleNext()
+        if isPlaying { scheduleNext() }
     }
 
     private func stopAnimation() {
@@ -48,11 +74,16 @@ struct AnimatedPreview: View {
     }
 
     private func scheduleNext() {
-        guard let frame = frames[safe: currentIndex] else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: frame.delay, repeats: false) { _ in
+        guard isPlaying, let frame = frames[safe: currentIndex] else { return }
+        // Divide by speedMultiplier (floored at 0.1 to avoid pathological
+        // intervals near zero). Export pipeline still applies Speed.
+        let interval = frame.delay / max(0.1, speedMultiplier)
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { _ in
             Task { @MainActor in
+                guard isPlaying else { return }
                 currentIndex = (currentIndex + 1) % frames.count
-                // Report elapsed time
+                // Report elapsed time in *source* seconds so the timeline
+                // playhead tracks real trim coordinates, not speed-scaled ones.
                 let elapsed = frames.prefix(currentIndex).reduce(0.0) { $0 + $1.delay }
                 onTimeUpdate?(elapsed)
                 scheduleNext()

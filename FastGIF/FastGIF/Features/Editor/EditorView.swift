@@ -8,14 +8,21 @@ struct EditorView: View {
     @State private var showExport = false
     @State private var showPalette = false
     @State private var showFilters = false
+    @State private var showSettings = false
+    /// Anchors hardware-keyboard focus so spacebar reaches the editor.
+    @FocusState private var keyboardFocus: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            // WYSIWYG Preview — shows processed output
+            // WYSIWYG Preview — shows processed output, restricted to the
+            // current trim window so dragging the handles updates the live
+            // preview immediately even before the WYSIWYG pass catches up.
             AnimatedPreview(
-                frames: project.previewFrames.isEmpty ? project.frames : project.previewFrames,
+                frames: project.previewFrames.isEmpty ? project.trimmedFrames : project.previewFrames,
+                isPlaying: project.isPlaying,
                 isLoading: project.isImporting,
-                loadingProgress: project.importProgress
+                loadingProgress: project.importProgress,
+                speedMultiplier: project.speed
             ) { time in
                 project.currentTime = time
             }
@@ -23,7 +30,23 @@ struct EditorView: View {
             .background(Theme.surface)
             .clipShape(RoundedRectangle(cornerRadius: Theme.radiusMedium))
             .padding(Theme.spacing16)
-            .onTapGesture { showControls.toggle() }
+            .overlay(alignment: .bottomTrailing) {
+                if project.hasFrames {
+                    PlayPauseButton(isPlaying: project.isPlaying) {
+                        project.isPlaying.toggle()
+                    }
+                    .padding(Theme.spacing16 + Theme.spacing8)
+                    .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                // Tap-to-toggle playback — the standard video gesture.
+                // Controls live in the toolbar, so the preview is free
+                // to behave like a media surface.
+                guard project.hasFrames else { return }
+                project.isPlaying.toggle()
+            }
 
             // Unified timeline — trim handles + playhead on one rail.
             // Frame-accurate, detent haptics, velocity continuity, accessible.
@@ -40,28 +63,50 @@ struct EditorView: View {
             }
         }
         .animation(Theme.springSnappy, value: showControls)
+        .animation(Theme.springSnappy, value: project.isPlaying)
+        // Hardware keyboard: spacebar toggles playback (iMovie convention).
+        // Focusable on the whole editor surface; focus claimed onAppear.
+        .focusable()
+        .focused($keyboardFocus)
+        .onAppear { keyboardFocus = true }
+        .onKeyPress(.space) {
+            guard project.hasFrames else { return .ignored }
+            project.isPlaying.toggle()
+            return .handled
+        }
         .toolbar {
+            // Primary action stays in the top bar — Export is the
+            // single most important moment of the editing flow.
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Export", systemImage: "square.and.arrow.up") {
                     showExport = true
                 }
                 .disabled(!project.hasFrames)
             }
+            // Everything else collapses into one More menu so the bar
+            // isn't a wall of icons. Order matches frequency-of-use
+            // (most common first).
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Filters", systemImage: "camera.filters") {
-                    showFilters = true
-                }
-                .disabled(!project.hasFrames)
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Palette", systemImage: "paintpalette") {
-                    showPalette = true
-                }
-                .disabled(!project.hasFrames)
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Controls", systemImage: "slider.horizontal.3") {
-                    showControls.toggle()
+                Menu {
+                    Button("Controls", systemImage: "slider.horizontal.3") {
+                        showControls.toggle()
+                    }
+                    Button("Filters", systemImage: "camera.filters") {
+                        showFilters = true
+                    }
+                    .disabled(!project.hasFrames)
+                    Button("Palette", systemImage: "paintpalette") {
+                        showPalette = true
+                    }
+                    .disabled(!project.hasFrames)
+                    Divider()
+                    Button("Settings", systemImage: "gearshape") {
+                        showSettings = true
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .accessibilityLabel("More")
+                        .accessibilityIdentifier("more.circle")
                 }
             }
         }
@@ -74,6 +119,9 @@ struct EditorView: View {
         .sheet(isPresented: $showFilters) {
             FilterView(project: project)
         }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
         .overlay {
             if project.isProcessing {
                 ProcessingOverlay(
@@ -82,6 +130,30 @@ struct EditorView: View {
                 )
             }
         }
+    }
+}
+
+/// Frosted circular play/pause button overlaid on the preview.
+/// Matches Apple Photos / iMovie shape — 44pt tap target, soft shadow,
+/// SF Symbol crossfade on toggle.
+struct PlayPauseButton: View {
+    let isPlaying: Bool
+    let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
+                .contentTransition(reduceMotion ? .identity : .symbolEffect(.replace))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isPlaying ? "Pause preview" : "Play preview")
     }
 }
 
