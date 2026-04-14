@@ -153,6 +153,8 @@ func buildPipeline() -> Pipeline {
 
 The existing Swift `Quantize(CIColorPosterize)` stage is **deleted**. It was a cosmetic preview of quantization that duplicated the real work Rust does. The existing Swift `Dither` (CIRandom noise) is **deleted**. Preview and export both rely on Rust for the final color work.
 
+**Preview/export parity (amendment — see §9.P3).** Deleting the Swift `Quantize` stage breaks the WYSIWYG preview at `GIFProject.swift:94-103`, which currently runs `Quantize(colors:)` on sampled frames. After the deletion, `updatePreview()` must route sampled frames through `Encoder.encodeGIF(..., quality: .draft)` at preview resolution (240 px) and decode one frame back for display, OR call a new lightweight `fastgif_preview_frame` FFI that returns a single quantized RGBA buffer (no LZW, no container). We pick the second option: a new Rust function `fastgif_preview_frame(rgba, w, h, colors) -> *mut RawFrame` that runs NeuQuant + `index_of` and returns the palette-reconstructed RGBA image — ~40 LOC Rust, ~5ms per 240 px frame, called once per preview refresh. The preview always uses `quality = .draft` (per-frame NeuQuant, no dither) regardless of `project.quality`; the user sees the color budget honestly without paying the Best-mode cost on every slider tick. See §9.P3 for the formal parity proposition.
+
 ### 1.2 Real 8×8 Bayer dither for `.good`
 
 **File**: `Kernel/ImageProcessing.swift` — new `BayerDither: Stage`, ~35 LOC.
@@ -187,7 +189,7 @@ Floyd-Steinberg is not implementable as a color kernel (error diffusion requires
 
 For Quality = Best we train NeuQuant once on a representative sample of the full clip, not every frame. The sampling discipline lives in the Rust side of §1.4 — it is small enough that a dedicated Swift module is not justified.
 
-Strategy: sample **max 4 frames** evenly across the trim range, at the target export resolution (default 240 px). That's roughly 4 × 240 × 240 × 4 ≈ **900 KB** of training data — comfortably within NeuQuant's budget, one train pass, ~50ms on an iPhone 16 Pro. Four frames is enough to learn the color distribution of continuous motion without the quadratic-cost blowup of training on the full clip.
+Strategy: sample **8 frames** evenly across the trim range, at the target export resolution (default 240 px). That's roughly 8 × 240 × 240 × 4 ≈ **1.8 MB** of training data — comfortably within NeuQuant's budget, one train pass, <100 ms on an iPhone 16 Pro. (Earlier drafts said 4; 8 is the amended value per §9.P4 — the cost delta is negligible and 8 gives real headroom for short-lived color inserts that 4 would miss on a 3 s clip.)
 
 **Rejected alternative**: `MPSImageHistogram` to build a GPU-side joint histogram and feed reduced data to NeuQuant. Looks clever on paper, but `MPSImageHistogram` only returns *per-channel marginals* (3 × 256 bins), and reconstructing a joint RGB distribution from marginals is mathematically wrong — you'd be training on a distribution the clip never actually exhibited. Sampling raw frames is correct, simpler, and fast enough.
 
@@ -210,7 +212,7 @@ pub unsafe extern "C" fn fastgif_encode_global(
 
 Algorithm:
 
-1. Sample up to **4 frames** evenly across `frames_ptr[..count]`, concatenate their RGBA bytes into a single training buffer (~900 KB at 240 px square). This is §1.3's sampling discipline implemented in Rust.
+1. Sample **8 frames** evenly across `frames_ptr[..count]`, concatenate their RGBA bytes into a single training buffer (~1.8 MB at 240 px square). This is §1.3's sampling discipline implemented in Rust.
 2. Train **one** `NeuQuant` on the concatenated training buffer.
 3. Extract `color_map_rgb()` → single shared palette.
 3. For each frame, run temporal Sierra2_4a error diffusion against the shared palette:
@@ -227,15 +229,50 @@ Parallelism: the per-frame inner loop parallelizes via `rayon::iter::ParallelIte
 
 **File**: `rust/fastgif-core/src/lib.rs`, `rust/fastgif-core/Cargo.toml`.
 
-Today the encoder processes frames serially in a `for rf in raw_frames` loop. For `fastgif_encode_global` (Quality = Best) the shared palette is known up front, so each frame's index-buffer generation is independent — a perfect `rayon::iter::ParallelIterator` fit.
+Today the encoder processes frames serially in a `for rf in raw_frames` loop. For `fastgif_encode_global` the shared palette is known up front, but Sierra2_4a error diffusion has a spatial dependency graph that rules out naive per-frame `par_iter`. We parallelize **within** a frame, not across frames, so temporal error carry is preserved.
 
-Change:
-1. Add `rayon = "1.10"` to `Cargo.toml`.
-2. Compute all frames' index buffers with `raw_frames.par_iter().map(|rf| quantize_frame(rf, &nq, &mut error_carry))`.
-3. The temporal Sierra2_4a error-carry buffer is sequential across frames; to preserve it under parallelism, the carry is threaded through a sequential post-pass that applies diffusion on top of the pre-quantized indices. (Or: accept frame-local dithering when parallelized, sequential dithering when not. The first commit of §1.4 does spatial-only; the temporal commit can go sequential because its cost is dominated by the spatial pass which is already parallel.)
-4. Entropy encoding via `gif::Encoder::write_frame` stays sequential — that's the LZW step and it must be serial anyway.
+**Why per-frame `par_iter` is wrong (amendment — see §9.P1).** Let `E_n` be the final error buffer of frame `n`. Temporal Sierra2_4a is defined by `E_n = diffuse(rgba_n, palette, seed=E_{n-1})`, a strict sequential recurrence. Any schedule that runs frames `n` and `n+1` in parallel must either (a) seed frame `n+1`'s error buffer with zeros, losing temporal continuity (the zero-flicker guarantee), or (b) seed it with a stale approximation, introducing a bias that the flicker metric will catch. Neither is acceptable. We preserve the frame-level sequential recurrence and parallelize the spatial diffusion inside `diffuse(·)` itself.
 
-Speed win target: ~3-4× on a 6-core phone, limited by Amdahl on the sequential LZW tail. This is the most honest speed win in the spec — no GPU synchronization risk, no driver bugs, just CPU cores we're leaving on the table.
+**Row-tile schedule.** Within one frame, Sierra2_4a's diffusion kernel writes to 3 neighbors: `(x+1, y)`, `(x-1, y+1)`, `(x, y+1)`. The data dependency for pixel `(x, y)` is on pixels `(x', y')` with `y' < y` OR `(y' = y AND x' < x)`. Partition the frame into `T` horizontal row-tiles of height `H/T`. Tile `t` can begin processing row `r` iff tile `t-1` has finished row `r+2` (to guarantee the 2-row error footprint of Sierra2_4a has landed). This is a classic pipelined parallel schedule: the critical path is `O(H + T·W)` rather than `O(H·W)`, so for `T` workers on a frame with `W ≈ H`, we get ~`T`-way speedup with a small stage-fill overhead.
+
+```rust
+// Pseudocode — real impl uses rayon::scope + crossbeam channels.
+let num_tiles = rayon::current_num_threads().min(h / 8);
+let tile_height = h / num_tiles;
+let progress: Vec<AtomicUsize> = (0..num_tiles).map(|_| AtomicUsize::new(0)).collect();
+
+rayon::scope(|s| {
+    for t in 0..num_tiles {
+        let progress = &progress;
+        s.spawn(move |_| {
+            for r in 0..tile_height {
+                // Wait until tile t-1 has processed row r+2
+                if t > 0 {
+                    while progress[t-1].load(Ordering::Acquire) < r + 2 {
+                        std::hint::spin_loop();
+                    }
+                }
+                diffuse_row(tile_t, r, palette, error_carry_from_prev_frame);
+                progress[t].store(r + 1, Ordering::Release);
+            }
+        });
+    }
+});
+```
+
+**Correctness** (§9.P1 proof sketch). The row-tile schedule is a topological order of Sierra2_4a's dependency DAG: every pixel `(x, y)` is processed strictly after its three up-left neighbors and their error contributions have landed. The `progress[t-1] >= r+2` barrier guarantees tile `t`'s row `r` sees the same error state as in a sequential raster-order traversal. Therefore the output `index_buffer` is bit-identical to a sequential run. ∎
+
+**Change list:**
+1. Add `rayon = "1.10"` and `crossbeam-utils = "0.8"` to `Cargo.toml`.
+2. Frame loop stays sequential (to preserve `E_{n-1} → E_n` temporal carry).
+3. Within each frame, `diffuse_tiled(rgba, palette, error_in) -> (indices, error_out)` runs the row-tile schedule above.
+4. LZW entropy coding via `gif::Encoder::write_frame` stays sequential — unchanged.
+
+**Expected speedup.** On a 6-performance-core iPhone 16 Pro, `T = 6`, frame `W = H = 240`: critical path `≈ 240 + 6·240 = 1680` pixel-steps vs. sequential `240·240 = 57600` pixel-steps. Theoretical ~34× within-frame; practical ~4-5× once cache-line contention, barrier cost, and Amdahl's sequential LZW tail are accounted for. Enough to hit the §Goals #3 wall-clock targets.
+
+**Rejected alternative**: per-frame `par_iter` with zero-seeded error carry. Correct for `draft`/`good` (no temporal). Wrong for `best`. Not worth the branching complexity — row-tile works for all three quality modes with one code path.
+
+**Deferred speed polish (not in this pass)**: Metal compute nearest-palette lookup kernel. Investigated — would buy another ~2× on the lookup step — but requires `MTLBuffer` ↔ Rust FFI plumbing and a CI-invisible GPU dependency. Row-tile CPU parallelism is enough; if we need more later, this is the next lever.
 
 **Deferred speed polish (not in this pass)**: Metal compute nearest-palette lookup kernel. Investigated — would buy another ~2× on the lookup step — but it requires `MTLBuffer` ↔ Rust FFI plumbing and a CI-invisible GPU dependency. The Rayon win is enough to hit our wall-clock goal; if we need more later, this is the next lever.
 
@@ -431,9 +468,19 @@ The validator loads the latest exported `.gif` from the simulator's Photos libra
 | Total duration within ±5% of expected | Sum of per-frame `kCGImagePropertyGIFDelayTime` | Tolerance |
 | Global color table present (Best mode only) | LSD packed field bit 7 at offset 10 | Bit set |
 | File size within ±30% of a known-good reference | Byte count vs. `tests/fixtures/cat-loaf-3s-best.gif.bytes` | Tolerance |
-| Flicker metric below threshold (Best mode only) | Sample a fixed 32×32 region across all frames, measure palette-index variance | Variance < 2.0 |
+| Flicker metric below threshold (Best mode only) | Sample a fixed 32×32 region across all frames, measure palette-index variance | `≤ α · baseline` (see below) |
 
 The flicker metric is the key reliability gate. It is what proves the "zero-flicker" promise mechanically, not visually. If the metric regresses, the commit fails.
+
+**Baseline discipline (amendment — see §9.P2).** The threshold `< 2.0` in earlier drafts was pulled from thin air and is replaced with a **baseline-relative bound**. On commit 1 (infra), the validator is run against the *unchanged* `fastgif_encode` path (per-frame NeuQuant, fake dither) on the cat-loaf reference clip. The measured flicker variance is recorded as `B_0` in `tests/fixtures/flicker-baseline.txt`, signed with `git hash-object`, and committed as part of the infra commit. Downstream commits assert `flicker(c) ≤ α · B_0` with:
+
+- **Commit 3 (global palette, spatial Sierra only):** `α = 0.6` — global palette alone is expected to cut flicker by at least 40% on continuous-motion content.
+- **Commit 4+ (global palette + temporal Sierra2_4a):** `α = 0.3` — temporal error carry takes another 50% off.
+- **Commits 2, 5-8:** no tightening; must simply not regress vs. the most recent committed measurement.
+
+If `B_0 < 1.0` (the baseline is already very low — unlikely for per-frame NeuQuant on a gradient clip, but possible on a low-motion clip), the validator falls back to an absolute floor of `0.5` so the gate remains meaningful. Both bounds are applied: `flicker(c) ≤ max(α · B_0, 0.5)` where the `max` is a noise-floor guard, not a relaxation — the effective bound is the looser of the two, which means the user's clip must genuinely produce low-flicker output on a generous-but-nonzero budget.
+
+**Why this is honest.** An absolute threshold assumes knowledge we don't have. A relative threshold forces every commit to prove a **reduction** vs. a known-measured prior state. The reference clip is frozen (checked in), the baseline is frozen (signed), so `B_0` is reproducible across machines and over time.
 
 ### 4.4 Per-commit verification script
 
@@ -539,18 +586,154 @@ Listed here so future-me doesn't drift into scope creep:
 
 ---
 
-## 8. Open questions (none blocking)
+## 8. Resolved decisions (was: open questions)
 
-- **Default quality preset for video imports**: `.good` (current plan) or `.best` (quality-first)? `.best` is slower but matches the "zero-flicker" headline claim. Spec says `.good`; I'll confirm before commit 2. Recommendation: **change to `.best`** — the headline is more valuable than the speed delta, and Metal lookup (§1.5) narrows the gap.
-- **StickerWizard in MoreMenu**: keep as an overflow entry, or remove entirely? Spec keeps under "move, don't delete" discipline; confirm before commit 9.
-- **Reference clip sourcing**: `tests/fixtures/cat-loaf-3s.mov` needs to exist. If I can't find a suitable fixture, I'll record a 3s screen-recording of a gradient test pattern and use that instead. Confirm with user if the fixture question comes up.
+- **Default quality preset for video imports: `.good`** — locked. `.best` is `slowest` and `schedulePreview()` fires on every slider tick (300 ms debounce), so defaulting to `.best` would make the editor feel heavy on every adjustment. The preview pipeline **always** uses `quality = .draft` regardless of `project.quality` (§1.1 amendment) so the choice only affects the export path. Users who want zero-flicker flip one picker; the default is fast.
+- **StickerWizard in MoreMenu: keep as overflow entry.** Move-don't-delete discipline. Zero silent feature removal.
+- **Reference clip sourcing: `tests/fixtures/cat-loaf-3s.mov` is created in commit 1.** The infra commit either checks in an existing cat-loaf clip (if one is on disk) or records a 3s synthetic gradient test pattern via `scripts/make-fixture.sh` (AVFoundation + `CIColorRamp`). The clip is committed to the repo so `B_0` (the flicker baseline) is reproducible across machines and is frozen for the duration of this pass.
+- **Training sample size: 8 frames (was 4).** Amendment per §9.P4. For a 3 s/24 fps clip that's frames `[0, 10, 20, 30, 40, 50, 60, 71]` — roughly 1.8 MB training input at 240 px, still <100 ms NeuQuant train. The 4-frame number in §1.3 is replaced with 8 everywhere.
 
 ---
 
-## Success criteria (the "done" bar)
+## 9. Formal amendments (Curry-Howard edition)
+
+*This section treats the spec as a proof obligation. Each proposition is a type; its construction is a program; `scripts/verify.sh` is the proof checker. A commit lands iff it produces a well-typed witness of the propositions it touches. This is not decoration — it is how we make the rest of the document self-checking.*
+
+### 9.0 Types
+
+```
+Frame         : Type              -- an RGBA image with a delay
+Palette       : Type              -- ≤256 RGB triples
+ErrorBuf      : Type              -- signed RGB accumulator, shape = frame
+IndexBuf      : Type              -- one byte per pixel
+Quality       : { draft, good, best }
+B₀            : ℝ₊                -- flicker baseline, measured once, frozen
+```
+
+A GIF export is a function
+```
+encode : List Frame × Quality × LoopCount → ByteString
+```
+and our obligation is not that `encode` produces *any* ByteString but one whose image has certain properties.
+
+### 9.P1 — Row-tile diffusion preserves sequential semantics
+
+**Proposition.**
+```
+∀ (frames : List Frame) (pal : Palette) (T : ℕ, T ≤ H):
+    diffuse_tiled(frames, pal, T) ≡ diffuse_sequential(frames, pal)
+```
+where `≡` is bitwise equality of the resulting `List IndexBuf × List ErrorBuf`.
+
+**Type of the witness.**
+```
+bit_identity : ∀ T. (out_seq : IndexBufs) × (out_tiled T : IndexBufs) × (Eq out_seq out_tiled)
+```
+
+**Construction sketch.** Sierra2_4a defines a DAG `G` on pixels where `(x, y) → (x+1, y)`, `(x, y) → (x−1, y+1)`, `(x, y) → (x, y+1)`. A valid quantization is any function from pixels to palette indices that is a topological traversal of `G`. The row-tile schedule visits row `r` in tile `t` only after tile `t−1` has visited row `r+2` (the 2-row footprint of Sierra2_4a), so the partial order is respected. Two topological traversals of the same DAG that consume the same inputs produce the same outputs (determinism of `index_of`). Therefore `diffuse_tiled ≡ diffuse_sequential` pointwise. ∎
+
+**Proof obligation (commit 5).** `rust/fastgif-core/tests/sierra_parity.rs` runs `diffuse_sequential` and `diffuse_tiled` on the same 240×240 gradient frame + zero error-in, asserts byte-equal `IndexBuf` and `ErrorBuf` outputs. For `T ∈ {1, 2, 4, 6, 8}`. `cargo test --release sierra_parity` is a precondition of `verify.sh` step 1.
+
+This is the witness that commit 5 did not break commit 4's temporal guarantee. Without it, the parallelism is folk wisdom.
+
+### 9.P2 — Flicker is a measurable, monotone-decreasing quantity
+
+**Proposition.**
+```
+∀ c ∈ {commit 1, …, commit 8}:
+    flicker(c, cat_loaf) ≤ max(α(c) · B₀, 0.5)
+```
+where
+```
+α : Commit → (0, 1]
+α(1) = 1.0        -- baseline commit, flicker(1) = B₀ by definition
+α(2) = 1.0        -- encoder truth refactor; no quality regression allowed
+α(3) = 0.6        -- global palette alone cuts flicker ≥40%
+α(4) = 0.3        -- temporal Sierra takes another 50%
+α(5) = 0.3        -- parallelism must be bit-identical per 9.P1
+α(6..8) = 0.3     -- UI/motion commits must not touch the encoder path
+```
+
+**Type of the witness.**
+```
+flicker_proof : (c : Commit) → flicker(c, cat_loaf) ≤ max(α(c) · B₀, 0.5)
+```
+
+**Construction.** `tests/validate_gif.swift` computes `flicker(gif) = variance_over_frames(palette_index(gif, region=(104,104,32,32)))`. On commit 1, it writes `B₀ = flicker(unchanged_encoder(cat_loaf))` to `tests/fixtures/flicker-baseline.txt`, signed with `git hash-object`. On each subsequent commit, it reads `B₀`, computes `flicker(c)`, and asserts the bound. If false, the script exits non-zero and `verify.sh` fails.
+
+**Why `max(…, 0.5)`.** If `B₀` turns out pathologically small on the chosen reference clip, a relative bound becomes vacuous (or worse, unreachable). The absolute floor `0.5` is a noise-level guarantee drawn from the variance a perfect quantizer would still exhibit on 8-bit quantized gradients (measured separately at `tests/fixtures/noise-floor.gif`). We accept either bound; the looser one governs.
+
+**Falsification path.** If commit 3 fails this, either (a) global palette didn't help on the cat-loaf clip (unlikely but possible — the clip is continuous-motion, which is exactly where global palette wins), (b) our sampling of 8 frames missed the color signal, in which case we revisit `§1.3` sample count, or (c) `B₀` was mismeasured. In each case the witness tells us *which* — a scalar metric that fails silently is not a proof.
+
+### 9.P3 — Preview parity with export
+
+**Proposition.**
+```
+∀ (frame : Frame):
+    preview_color_budget(frame) = export_color_budget(frame, quality = .draft)
+```
+where `*_color_budget` means "the set of distinct RGB triples the user sees after quantization."
+
+**Why this matters.** WYSIWYG is a *type*. Today the Swift `Quantize(CIColorPosterize)` stage produces a different color set than Rust's `NeuQuant`, so `preview ≠ export` even in the existing app. Deleting `Quantize` without replacing it produces `preview = identity ≠ export` — strictly worse. The amendment adds `fastgif_preview_frame` so preview and export share the same color-reduction function.
+
+**Type of the witness.**
+```
+preview_parity : (frame : Frame) → preview_color_budget(frame) ≡ export_color_budget(frame, .draft)
+```
+
+**Construction.**
+```rust
+#[no_mangle]
+pub unsafe extern "C" fn fastgif_preview_frame(
+    rgba: *const u8, w: u32, h: u32, colors: u32,
+) -> *mut RawFrame {
+    let pixels = slice::from_raw_parts(rgba, (w * h * 4) as usize);
+    let nq = NeuQuant::new(10, colors as usize, pixels);
+    let mut out = Vec::with_capacity(pixels.len());
+    for px in pixels.chunks_exact(4) {
+        let idx = nq.index_of(px) as usize;
+        let [r, g, b] = nq.color_map_rgb()[idx*3..idx*3+3].try_into().unwrap();
+        out.extend_from_slice(&[r, g, b, px[3]]); // preserve alpha
+    }
+    Box::into_raw(Box::new(RawFrame { rgba: out.as_ptr(), /* ... */ }))
+}
+```
+`Encoder.encodeGIF(quality: .draft)` also goes through `NeuQuant::new(10, colors, …)` and `nq.index_of`. Therefore by construction the two functions map the same input to the same color set. Swift test `PreviewParityTests.swift` asserts this holds on the cat-loaf reference frames by comparing `Set(unique_colors(preview))` with `Set(unique_colors(export_draft))`.
+
+**Proof obligation (commit 2, where the Swift `Quantize` gets deleted).** If commit 2 lands with a broken preview, the parity test fails, `verify.sh` fails, commit 2 gets reverted.
+
+### 9.P4 — Sampling is sufficient on the reference clip
+
+**Proposition.**
+```
+∀ (clip : List Frame, |clip| ≥ 24):
+    palette_error(NeuQuant(sample_8(clip)), clip) ≤ palette_error(NeuQuant(sample_4(clip)), clip)
+```
+where `palette_error` is mean-squared RGB distance from each pixel to its nearest palette entry.
+
+**Why it's not a real theorem.** This is the one place I cannot give you a construction proof — it's an empirical claim about a specific clip family. I mark it as a **measurement obligation**: commit 3's tests include a one-shot benchmark `rust/fastgif-core/tests/sampling_sufficiency.rs` that computes `palette_error` for both sampling counts on the cat-loaf clip and asserts `error_8 ≤ error_4`. If this ever fails, we're sampling badly and should reconsider (e.g., clustering by scene detection rather than uniform stride).
+
+We accept the weaker status honestly because the alternative — pretending 4 is "obviously enough" — is what the original spec did.
+
+### 9.5 — What the type system buys us
+
+Every `scripts/verify.sh` run checks:
+- **9.P1** via `cargo test --release sierra_parity` (byte-identity)
+- **9.P2** via `swift tests/validate_gif.swift …` (flicker ≤ bound)
+- **9.P3** via `xcodebuild test -only-testing:FastGIFTests/PreviewParityTests`
+- **9.P4** via `cargo test --release sampling_sufficiency`
+
+A commit that tries to merge `encode`-path changes without producing witnesses for the propositions it touches fails `verify.sh`. The spec is no longer a document; it is a sequent. `writing-plans` turns each proposition into a task; `build` produces the witnesses; `verify.sh` is the type-checker.
+
+"Making GIFs that don't flicker" becomes "producing a term of type `flicker_proof`." That is the version of SWE we're proving we can do.
+
+---
 
 - [ ] `scripts/verify.sh` passes on every commit, with all §4.3 binary checks green.
-- [ ] Flicker metric (§4.3, Best mode) < 2.0 on the cat-loaf reference clip.
+- [ ] `B_0` (flicker baseline) recorded in commit 1 on the unchanged per-frame-NeuQuant path; `tests/fixtures/flicker-baseline.txt` committed and signed via `git hash-object`.
+- [ ] Flicker metric (§4.3, Best mode) satisfies `flicker(commit 4+) ≤ max(0.3·B_0, 0.5)` on the cat-loaf reference clip.
+- [ ] Preview parity (§1.1 amendment): `updatePreview()` routes through `fastgif_preview_frame`, never through deleted Swift `Quantize`.
+- [ ] Row-tile diffusion (§1.5 amendment): unit test proves bit-identity against sequential Sierra2_4a on a canonical 240×240 gradient clip.
 - [ ] `scripts/bench.sh` shows a 5s/480p export at Quality=Best under 2.0s wall-clock on iPhone 16 Pro sim.
 - [ ] Visual verification: Photos.app playback of the exported GIF shows no shimmer on flat regions.
 - [ ] Zero top-level tabs in `ContentView`.
