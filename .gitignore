@@ -1,5 +1,6 @@
 .superpowers/
 .flowdeck/
+.claude/
 .worktrees/
 *.xcuserstate
 DerivedData/
