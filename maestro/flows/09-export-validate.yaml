@@ -1,0 +1,36 @@
+appId: com.fastgif.app
+---
+# Flow 09: Drive an Export → Photos with Quality=Best, for verify.sh.
+# The binary validation is NOT done in this flow — it is the next step
+# in scripts/verify.sh. This flow exists only to reproduce the UI path.
+
+- launchApp:
+    clearState: false
+- waitForAnimationToEnd
+# From Import screen, open Photos picker
+- assertVisible: "From Photos"
+- tapOn: "From Photos"
+- waitForAnimationToEnd: { timeout: 5000 }
+# Photos picker — tap the first available asset (FastGIF-Dev sim
+# has cat-loaf-3s.mov pre-loaded via xcrun simctl addmedia).
+- tapOn:
+    index: 0
+- waitForAnimationToEnd: { timeout: 10000 }
+# Wait for editor
+- assertVisible: "FastGIF"
+# Open More menu → Quality → Best (MoreMenu lands in commit 7; until
+# then this step is skipped and the flow passes the app's default picker)
+- runFlow:
+    when:
+      visible: "more.circle"
+    commands:
+      - tapOn: "more.circle"
+      - tapOn: "Quality"
+      - tapOn: "Best"
+- tapOn: "Export"
+- waitForAnimationToEnd
+- tapOn: "Save to Photos"
+- extendedWaitUntil:
+    visible: "Saved to Photos"
+    timeout: 60000
+- stopApp

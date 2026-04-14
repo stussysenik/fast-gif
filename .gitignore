@@ -4,3 +4,4 @@
 .worktrees/
 *.xcuserstate
 DerivedData/
+scripts/.sim-udid
