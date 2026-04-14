@@ -25,16 +25,13 @@ struct EditorView: View {
             .padding(Theme.spacing16)
             .onTapGesture { showControls.toggle() }
 
-            // Trim bar — only when a video source is available
-            if project.sourceVideoURL != nil {
-                TrimView(project: project) {
+            // Unified timeline — trim handles + playhead on one rail.
+            // Frame-accurate, detent haptics, velocity continuity, accessible.
+            if project.hasFrames {
+                Timeline(project: project) {
                     project.scheduleRetrim()
                 }
             }
-
-            // Time ruler — replaces frame thumbnails
-            TimeScrubber(project: project)
-                .frame(height: 56)
 
             // Controls bar
             if showControls {

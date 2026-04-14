@@ -1,0 +1,16 @@
+appId: com.fastgif.app
+---
+# Flow 99: Drive the app into the Editor with a video source loaded.
+# Uses "From Video" to filter to videos only (finds cat-loaf-3s.mp4).
+
+- launchApp:
+    clearState: true
+- waitForAnimationToEnd
+- assertVisible: "From Video"
+- tapOn: "From Video"
+- waitForAnimationToEnd:
+    timeout: 5000
+- tapOn:
+    point: "18%,28%"
+- waitForAnimationToEnd:
+    timeout: 15000
