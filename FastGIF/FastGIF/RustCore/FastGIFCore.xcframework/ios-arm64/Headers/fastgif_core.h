@@ -54,6 +54,22 @@ GIFOutput *fastgif_encode(
  */
 void fastgif_free(GIFOutput *output);
 
+/**
+ * Quantize one RGBA frame with NeuQuant and return a palette-reconstructed
+ * RawFrame whose alpha is preserved. Used by the WYSIWYG preview path.
+ *
+ * Caller must free with fastgif_raw_frame_free.
+ */
+RawFrame *fastgif_preview_frame(
+    const uint8_t *rgba,
+    uint32_t w,
+    uint32_t h,
+    uint32_t colors
+);
+
+/** Free a RawFrame returned by fastgif_preview_frame. Safe to call with NULL. */
+void fastgif_raw_frame_free(RawFrame *rf);
+
 #ifdef __cplusplus
 }
 #endif

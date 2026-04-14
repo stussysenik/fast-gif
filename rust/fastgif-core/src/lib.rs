@@ -133,3 +133,67 @@ pub unsafe extern "C" fn fastgif_free(output: *mut GIFOutput) {
         // o is dropped here, freeing the GIFOutput box
     }
 }
+
+/// Runs one-frame NeuQuant on `rgba` and returns a RawFrame whose pixels are
+/// the palette-reconstructed image. Preserves alpha. Caller frees with
+/// `fastgif_raw_frame_free`.
+///
+/// This is the witness for §9.P3 (preview_parity): it goes through the
+/// same `NeuQuant::new` + `index_of` pipeline as `fastgif_encode` in draft
+/// mode, so `preview_color_budget ≡ export_color_budget(.draft)` by construction.
+///
+/// # Safety
+/// - `rgba` must point to `w * h * 4` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fastgif_preview_frame(
+    rgba: *const u8,
+    w: u32,
+    h: u32,
+    colors: u32,
+) -> *mut RawFrame {
+    if rgba.is_null() || w == 0 || h == 0 {
+        return ptr::null_mut();
+    }
+    let n_px = (w as usize) * (h as usize);
+    let input = slice::from_raw_parts(rgba, n_px * 4);
+    let num_colors = (colors as usize).clamp(2, 256);
+    let nq = color_quant::NeuQuant::new(10, num_colors, input);
+
+    // Build palette-reconstructed RGBA.
+    let mut out_pixels = vec![0u8; n_px * 4];
+    let palette = nq.color_map_rgb();
+    for (dst, src) in out_pixels.chunks_exact_mut(4).zip(input.chunks_exact(4)) {
+        let idx = nq.index_of(src);
+        let base = idx * 3;
+        dst[0] = palette[base];
+        dst[1] = palette[base + 1];
+        dst[2] = palette[base + 2];
+        dst[3] = src[3]; // preserve alpha
+    }
+
+    // Leak the vec as a raw pointer; free in fastgif_raw_frame_free.
+    let mut boxed = out_pixels.into_boxed_slice();
+    let rgba_ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+
+    Box::into_raw(Box::new(RawFrame {
+        rgba: rgba_ptr,
+        width: w,
+        height: h,
+        delay_cs: 0,
+    }))
+}
+
+/// Free a RawFrame returned by `fastgif_preview_frame`.
+///
+/// # Safety
+/// - `rf` must be a pointer returned by `fastgif_preview_frame`, or null.
+#[no_mangle]
+pub unsafe extern "C" fn fastgif_raw_frame_free(rf: *mut RawFrame) {
+    if rf.is_null() {
+        return;
+    }
+    let boxed = Box::from_raw(rf);
+    let n = (boxed.width as usize) * (boxed.height as usize) * 4;
+    drop(Vec::from_raw_parts(boxed.rgba as *mut u8, n, n));
+}
