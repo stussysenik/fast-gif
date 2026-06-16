@@ -6,9 +6,13 @@ struct AnimatedPreview: View {
     let frames: [Frame]
     var isLoading = false
     var loadingProgress: Double = 0
+    /// Content identity — bumps when a fresh exact preview settles. Keys the
+    /// animator (not frame count) and drives the snap-to-truth cross-dissolve.
+    var contentVersion: Int = 0
     var onTimeUpdate: ((Double) -> Void)?
     @State private var currentIndex = 0
     @State private var timer: Timer?
+    @State private var settle: Double = 1
 
     var body: some View {
         Group {
@@ -16,6 +20,7 @@ struct AnimatedPreview: View {
                 Image(decorative: frame.image, scale: 1)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
+                    .opacity(settle)
                     .accessibilityLabel("Preview, frame \(currentIndex + 1) of \(frames.count)")
             } else if isLoading {
                 VStack(spacing: Theme.spacing16) {
@@ -32,7 +37,14 @@ struct AnimatedPreview: View {
         }
         .onAppear { startAnimation() }
         .onDisappear { stopAnimation() }
-        .onChange(of: frames.count) { startAnimation() }
+        // Restart the animator on content identity, not raw frame count, so an
+        // in-place re-quantize (same count) still refreshes — and snap-to-truth:
+        // a sub-150ms cross-dissolve as the fresh exact frame settles in.
+        .onChange(of: contentVersion) {
+            startAnimation()
+            settle = 0.65
+            withAnimation(.easeInOut(duration: 0.14)) { settle = 1 }
+        }
     }
 
     private func startAnimation() {

@@ -59,6 +59,8 @@ GIFOutput *fastgif_encode(
  * @param loop_count 0 = loop infinitely; N = loop N times.
  * @param quality    NeuQuant sample factor for palette training (1=best, 30=fast).
  * @param dither     0 = nearest-color; non-zero = spatial Sierra2_4a diffusion.
+ * @param cancel     Optional pointer to a flag byte; if it becomes non-zero the
+ *                   encode aborts and returns NULL. Pass NULL to disable.
  * @return           Heap-allocated GIFOutput, or NULL. Free with fastgif_free().
  */
 GIFOutput *fastgif_encode_global(
@@ -67,7 +69,8 @@ GIFOutput *fastgif_encode_global(
     uint32_t colors,
     uint16_t loop_count,
     int32_t quality,
-    uint8_t dither
+    uint8_t dither,
+    const uint8_t *cancel
 );
 
 /**

@@ -82,7 +82,7 @@ fn main() {
     // The global path applies spatial Sierra diffusion (dither=1), representing the
     // `best` export tier the flicker gate measures.
     let out = if global {
-        unsafe { fastgif_encode_global(frames.as_ptr(), frames.len(), colors, 0, quality, dither) }
+        unsafe { fastgif_encode_global(frames.as_ptr(), frames.len(), colors, 0, quality, dither, std::ptr::null()) }
     } else {
         unsafe { fastgif_encode(frames.as_ptr(), frames.len(), colors, 0, quality) }
     };

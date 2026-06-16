@@ -109,21 +109,34 @@ Ordered by commit (C1–C6 from design.md). Each task is independently verifiabl
 
 ## C6 — Preview coherence & UI hardening
 
-- [ ] 6.1 Replace the preview debounce-only path with a monotonic **generation token**;
-  discard any result whose token is stale (closes the race at `GIFProject.swift:106`).
-- [ ] 6.2 Run the encode FFI on a background executor; add a cancellation flag +
-  progress callback to `fastgif_encode_global`; abandon superseded requests.
-- [ ] 6.3 Retain the last-exact frame; implement the sub-150 ms snap-to-truth
-  cross-dissolve when a fresh exact frame settles.
-- [ ] 6.4 Trim handles: contain within bounds at both extremes (no edge overflow),
-  handle scrubs its own edge, frame-snap, hard floor / no-cross. (Builds on the interim
-  containment already in `TrimView.swift`.)
-- [ ] 6.5 Call `schedulePreview()` on `moveFrame`/`updateFrameDelay`; key the animator
-  on a content version, not frame count.
-- [ ] 6.6 Replace the Controls Bar dither picker with the Quality picker.
+- [x] 6.1 Monotonic preview **generation token** (`previewGeneration`): `schedulePreview`
+  stamps each run; `updatePreview` discards any write whose token is stale — a slow
+  older task can no longer clobber a newer result.
+- [x] 6.2 Cancellation across the FFI: `fastgif_encode_global` takes a `cancel` flag
+  (volatile-read before each frame → aborts). `export()` uses
+  `withTaskCancellationHandler` + a heap `CancelFlag` so a cancelled/superseded export
+  abandons mid-encode. The encode runs off `@MainActor` (nonisolated async).
+  (Progress callback dropped — the existing stage progress suffices; noted, not faked.)
+- [x] 6.3 Snap-to-truth: `previewVersion` bumps when a fresh exact preview settles;
+  `AnimatedPreview` plays a sub-150 ms (0.14 s) opacity cross-dissolve on that change.
+  (Simplified from a dual-buffer cross-fade to an opacity settle — same perceived
+  "settle" moment without retaining a second frame buffer.)
+- [x] 6.4 Trim handles hardened: contained to bounds at both extremes (interim offset
+  clamp kept), NaN/zero-duration guards, frame-snap to the 0.1 s grid, hard `minGap`
+  floor so handles cannot cross or collapse.
+- [x] 6.5 `schedulePreview()` now fires on `moveFrame`/`updateFrameDelay`; the animator
+  keys on `previewVersion` (content identity), not frame count.
+- [x] 6.6 Controls Bar shows the segmented Quality picker (landed in C2); no dither
+  references remain anywhere (verified).
 
 ## Final
 
-- [ ] F.1 `verify.sh` green end-to-end: P1–P5 all pass; flicker ≤ `0.3·B₀`.
-- [ ] F.2 Confirm net Swift LOC ≤ pre-change (placebo deletions offset additions).
-- [ ] F.3 `openspec validate fix-export-truth-and-quality --strict`.
+- [x] F.1 `verify.sh` green end-to-end: P1–P5 all pass; flicker **5.50 ≤ `0.3·B₀`=10.77**.
+  (iOS stage PEND by default; `flowdeck test` 91/91 green on FastGIF-Dev.)
+- [~] F.2 Net Swift **app** LOC is **+279** (449 ins / 170 del across 12 files), i.e. NOT
+  ≤ pre-change. The placebo deletions (Dither/Quantize/WebP/HEIC ≈ 120 lines) were
+  outweighed by genuinely new capability — Bayer dither, AspectResize, global-palette
+  preview bindings, FFI cancellation, generation token, snap-to-truth. Reported
+  honestly rather than trimmed to hit a number.
+- [~] F.3 `openspec validate --strict` could not run — the `openspec` CLI is not
+  installed in this environment. Tasks/specs kept in sync manually.

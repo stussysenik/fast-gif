@@ -9,9 +9,9 @@ protocol Stage {
 /// Composes stages using Swift's @resultBuilder for declarative pipelines.
 ///
 ///     let p = Pipeline {
-///         Resize(to: CGSize(width: 320, height: 240))
-///         Quantize(colors: 256)
-///         Dither(.floydSteinberg)
+///         AspectResize(maxEdge: 320)
+///         Speed(multiplier: 2.0)
+///         BayerDither(colors: 64)
 ///     }
 ///     let output = try await p.run(inputFrames)
 ///

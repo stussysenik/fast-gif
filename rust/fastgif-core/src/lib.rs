@@ -178,9 +178,14 @@ pub unsafe extern "C" fn fastgif_encode(
 /// - `loop_count`: 0 = infinite; N>0 = loop N times
 /// - `quality`: NeuQuant sample factor for palette training (1=best, 30=fastest)
 /// - `dither`: 0 = nearest-color; non-zero = spatial Sierra2_4a diffusion
+/// - `cancel`: optional pointer to a flag byte. Checked before each frame; if it
+///   becomes non-zero the encode aborts and returns null. Pass null to disable.
+///   Lets a superseded export be abandoned mid-encode (a sibling task flips it).
 ///
 /// # Safety
-/// Same contract as `fastgif_encode`. Returns null on failure; free with `fastgif_free`.
+/// Same contract as `fastgif_encode`. `cancel`, if non-null, must point to a byte
+/// valid for the duration of the call. Returns null on failure/cancel; free with
+/// `fastgif_free`.
 #[no_mangle]
 pub unsafe extern "C" fn fastgif_encode_global(
     frames_ptr: *const RawFrame,
@@ -189,6 +194,7 @@ pub unsafe extern "C" fn fastgif_encode_global(
     loop_count: u16,
     quality: i32,
     dither: u8,
+    cancel: *const u8,
 ) -> *mut GIFOutput {
     if frames_ptr.is_null() || count == 0 {
         return ptr::null_mut();
@@ -219,6 +225,13 @@ pub unsafe extern "C" fn fastgif_encode_global(
         let mut prev: Option<&[u8]> = None;
 
         for rf in raw_frames {
+            // Cooperative cancellation: bail before spending work on this frame.
+            if !cancel.is_null() && ptr::read_volatile(cancel) != 0 {
+                return Err(gif::EncodingError::from(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
             let fw = rf.width as usize;
             let fh = rf.height as usize;
             let rgba = slice::from_raw_parts(rf.rgba, fw * fh * 4);

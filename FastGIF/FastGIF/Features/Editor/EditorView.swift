@@ -15,7 +15,8 @@ struct EditorView: View {
             AnimatedPreview(
                 frames: project.previewFrames.isEmpty ? project.frames : project.previewFrames,
                 isLoading: project.isImporting,
-                loadingProgress: project.importProgress
+                loadingProgress: project.importProgress,
+                contentVersion: project.previewVersion
             ) { time in
                 project.currentTime = time
             }

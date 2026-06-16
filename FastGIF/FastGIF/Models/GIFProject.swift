@@ -3,6 +3,21 @@ import Foundation
 import Observation
 import AVFoundation
 
+/// Heap-allocated one-byte cancellation flag shared with the Rust encoder.
+/// The Rust side reads it volatile before each frame; flipping it aborts the encode.
+final class CancelFlag: @unchecked Sendable {
+    let pointer: UnsafeMutablePointer<UInt8>
+    init() {
+        pointer = .allocate(capacity: 1)
+        pointer.initialize(to: 0)
+    }
+    func cancel() { pointer.pointee = 1 }
+    deinit {
+        pointer.deinitialize(count: 1)
+        pointer.deallocate()
+    }
+}
+
 /// The single source of truth for the entire app.
 /// iA Writer philosophy: one document, one focus.
 @MainActor @Observable
@@ -41,9 +56,17 @@ final class GIFProject {
 
     // WYSIWYG preview — processed frames at preview resolution
     var previewFrames: [Frame] = []
+    /// Bumps whenever `previewFrames` is replaced — drives the snap-to-truth
+    /// cross-dissolve and keys the animator (content identity, not frame count).
+    private(set) var previewVersion = 0
     private var previewTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
     private var retrimTask: Task<Void, Never>?
+
+    /// Monotonic preview generation token. Only the newest scheduled preview is
+    /// allowed to write `previewFrames`, so a slow older task can never clobber a
+    /// newer result (closes the stale-write race).
+    private var previewGeneration = 0
 
     // Computed
     var frames: [Frame] { document.frames }
@@ -82,13 +105,15 @@ final class GIFProject {
         }
     }
 
-    /// Schedule a debounced preview update (300ms).
+    /// Schedule a debounced preview update (300ms), tagged with a generation token.
     func schedulePreview() {
         previewTask?.cancel()
+        previewGeneration &+= 1
+        let gen = previewGeneration
         previewTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            await self?.updatePreview()
+            await self?.updatePreview(generation: gen)
         }
     }
 
@@ -97,8 +122,8 @@ final class GIFProject {
     /// Each sampled frame is run through the same Rust NeuQuant path as export
     /// (at the fast `draft` sample factor) so the preview shows true palette
     /// colors — not a posterize approximation.
-    func updatePreview() async {
-        guard hasFrames else { previewFrames = []; return }
+    func updatePreview(generation: Int? = nil) async {
+        guard hasFrames else { previewFrames = []; previewVersion &+= 1; return }
 
         let allFrames = document.frames
         // Sample evenly — 30 frames is plenty for a 240px preview
@@ -123,7 +148,10 @@ final class GIFProject {
         let factor = Quality.draft.sampleFactor
         let exact = processed.map { Encoder.previewFrame($0, colors: colors, quality: factor) }
         guard !Task.isCancelled else { return }
+        // Only the newest generation may publish — discard stale out-of-order writes.
+        if let generation, generation != previewGeneration { return }
         previewFrames = exact
+        previewVersion &+= 1
     }
 
     /// Process and export with current settings.
@@ -145,14 +173,23 @@ final class GIFProject {
                 Task { @MainActor in self?.progress = p * 0.8 }
             }
             progress = 0.8
-            let data = try await Encoder.encode(
-                frames: processed,
-                format: fmt,
-                loopCount: loops,
-                colors: colors,
-                quality: factor,
-                dither: dither
-            )
+            // Cancellable across the FFI: if this task is cancelled (e.g. a newer
+            // export supersedes it), flip the shared flag so the encoder aborts
+            // between frames instead of running to completion off-screen.
+            let flag = CancelFlag()
+            let data = try await withTaskCancellationHandler {
+                try await Encoder.encode(
+                    frames: processed,
+                    format: fmt,
+                    loopCount: loops,
+                    colors: colors,
+                    quality: factor,
+                    dither: dither,
+                    cancel: UnsafePointer(flag.pointer)
+                )
+            } onCancel: {
+                flag.cancel()
+            }
             progress = 1.0
             return data
         } catch {
@@ -235,6 +272,7 @@ final class GIFProject {
 
     func moveFrame(from source: IndexSet, to destination: Int) {
         document.frames.move(fromOffsets: source, toOffset: destination)
+        schedulePreview()
     }
 
     func duplicateFrame(at index: Int) {
@@ -252,6 +290,7 @@ final class GIFProject {
     func updateFrameDelay(at index: Int, delay: Double) {
         guard document.frames.indices.contains(index) else { return }
         document.frames[index].delay = delay
+        schedulePreview()
     }
 
     func reset() {

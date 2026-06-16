@@ -108,7 +108,8 @@ enum Encoder {
         loopCount: Int = 0,
         colors: Int = 256,
         quality: Int32 = 10,
-        dither: Bool = false
+        dither: Bool = false,
+        cancel: UnsafePointer<UInt8>? = nil
     ) throws -> Data {
         guard !frames.isEmpty else { throw EncoderError.noFrames }
         let result: Data? = try withRawFrames(frames) { raw in
@@ -116,7 +117,7 @@ enum Encoder {
                 guard let out = fastgif_encode_global(
                     buf.baseAddress, buf.count,
                     UInt32(min(max(colors, 2), 256)),
-                    UInt16(loopCount), quality, dither ? 1 : 0
+                    UInt16(loopCount), quality, dither ? 1 : 0, cancel
                 ) else { return nil }
                 defer { fastgif_free(out) }
                 return Data(bytes: out.pointee.data, count: out.pointee.len)
@@ -242,11 +243,12 @@ enum Encoder {
         loopCount: Int = 0,
         colors: Int = 256,
         quality: Int32 = 10,
-        dither: Bool = false
+        dither: Bool = false,
+        cancel: UnsafePointer<UInt8>? = nil
     ) async throws -> Data {
         switch format {
         case .gif:
-            return try encodeGIFGlobal(frames: frames, loopCount: loopCount, colors: colors, quality: quality, dither: dither)
+            return try encodeGIFGlobal(frames: frames, loopCount: loopCount, colors: colors, quality: quality, dither: dither, cancel: cancel)
         case .apng:
             return try encodeAPNG(frames: frames, loopCount: loopCount)
         case .mp4, .mov:
