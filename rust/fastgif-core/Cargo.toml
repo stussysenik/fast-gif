@@ -11,6 +11,11 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 color_quant = "1.1"
 gif = "0.13"
+# Scoped OS threads + cache-padded atomics for the row-tile diffusion wavefront.
+# (rayon's pool was evaluated but rejected: the wavefront spin-waits on neighbour
+# progress, which can starve a fixed-size work-stealing pool when tiles > workers;
+# real scoped threads are always co-scheduled and deadlock-free.)
+crossbeam-utils = "0.8"
 
 [profile.release]
 opt-level = 3

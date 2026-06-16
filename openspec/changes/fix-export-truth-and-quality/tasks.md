@@ -88,12 +88,24 @@ Ordered by commit (C1–C6 from design.md). Each task is independently verifiabl
 
 ## C5 — Row-tile parallel diffusion
 
-- [ ] 5.1 Add `rayon`, `crossbeam-utils` to `Cargo.toml`.
-- [ ] 5.2 Implement `diffuse::diffuse_tiled` with progress-tracking barriers (tile `t`
-  waits for tile `t-1` to clear Sierra's 2-row footprint).
-- [ ] 5.3 **Witness P1**: `tests/sierra_parity.rs` — `diffuse_tiled ≡ diffuse_sequential`
-  byte-for-byte on a 240×240 gradient for `T∈{1,2,4,6,8}`.
-- [ ] 5.4 Record encode wall-clock before/after on cat-loaf; assert speedup ≥ 3×.
+- [x] 5.1 Add `crossbeam-utils` to `Cargo.toml`. (rayon evaluated and rejected — the
+  wavefront spin-waits on neighbour progress, which can starve a fixed-size
+  work-stealing pool when tiles > workers; `crossbeam_utils::thread::scope` spawns
+  real co-scheduled OS threads, deadlock-free. Rationale documented in Cargo.toml.)
+- [x] 5.2 Implement `diffuse::diffuse_tiled`: vertical column strips on a skewed
+  release/acquire wavefront — strip `t` processes row `y` once its left neighbour has
+  cleared row `y` and its right neighbour row `y-1` (the Sierra footprint). Cross-tile
+  error writes are serialised per cell by the progress fences. `CachePadded` atomics.
+- [x] 5.3 **Witness P1**: `tests/sierra_parity.rs` — `diffuse_tiled ≡ diffuse_sequential`
+  byte-for-byte on a 240×240 gradient for `T∈{1,2,4,6,8}`. GREEN.
+- [~] 5.4 Speedup measured (`scripts/bench-diffuse.sh`, `bench_diffuse` bin): **~2.5×**
+  at 8 tiles on large frames (1024² ≈ 2.5×, 720² ≈ 2.2×), **below the 3× target.**
+  Honest cause: critical path is `O(2H + T)` (the wavefront ramp), boundary-column
+  cache-line bouncing, and per-frame OS-thread spawn — so the ceiling is ~T/2, not T,
+  on this 8-perf-core host. `diffuse_tiled` is the P1-proven primitive; production
+  `best` still uses sequential `diffuse_temporal` (kept for determinism + because the
+  temporal kernel carries a per-pixel feedback). Reaching ≥3× needs a persistent
+  worker pool + temporal-tiled integration — deferred (perf-only, not correctness).
 
 ## C6 — Preview coherence & UI hardening
 

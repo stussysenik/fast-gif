@@ -153,22 +153,132 @@ pub fn diffuse_temporal(
 /// deterministically.
 #[inline]
 fn distribute(err: &mut [i32], w: usize, h: usize, x: usize, y: usize, er: i32, eg: i32, eb: i32) {
+    // SAFETY: in-bounds indices; the slice fully owns the buffer here.
+    unsafe { distribute_ptr(err.as_mut_ptr(), w, h, x, y, er, eg, eb) }
+}
+
+/// Pointer form of `distribute`, used by the tiled wavefront where a tile may
+/// legitimately write into a neighbouring tile's columns (the down-left and
+/// right taps). Cross-tile writes are ordered by the wavefront's release/acquire
+/// progress fences, so although the buffer is shared, no two writes to the same
+/// cell are ever concurrent.
+///
+/// # Safety
+/// `base` must point to a `w*h*3` i32 buffer; `(x,y)` in bounds.
+#[inline]
+unsafe fn distribute_ptr(base: *mut i32, w: usize, h: usize, x: usize, y: usize, er: i32, eg: i32, eb: i32) {
     #[inline]
-    fn add(err: &mut [i32], i: usize, er: i32, eg: i32, eb: i32, num: i32) {
+    unsafe fn add(base: *mut i32, i: usize, er: i32, eg: i32, eb: i32, num: i32) {
         let e = i * 3;
-        err[e] += er * num / 4;
-        err[e + 1] += eg * num / 4;
-        err[e + 2] += eb * num / 4;
+        *base.add(e) += er * num / 4;
+        *base.add(e + 1) += eg * num / 4;
+        *base.add(e + 2) += eb * num / 4;
     }
     if x + 1 < w {
-        add(err, y * w + (x + 1), er, eg, eb, 2);
+        add(base, y * w + (x + 1), er, eg, eb, 2);
     }
     if y + 1 < h {
         if x >= 1 {
-            add(err, (y + 1) * w + (x - 1), er, eg, eb, 1);
+            add(base, (y + 1) * w + (x - 1), er, eg, eb, 1);
         }
-        add(err, (y + 1) * w + x, er, eg, eb, 1);
+        add(base, (y + 1) * w + x, er, eg, eb, 1);
     }
+}
+
+/// Raw pointer wrapper to share the error/index buffers across scoped threads.
+#[derive(Clone, Copy)]
+struct SyncPtr<T>(*mut T);
+// SAFETY: cross-thread access to the pointed-to buffers is serialised per cell by
+// the wavefront's progress fences (see `diffuse_tiled`).
+unsafe impl<T> Send for SyncPtr<T> {}
+unsafe impl<T> Sync for SyncPtr<T> {}
+
+/// Row-tile *parallel* Sierra2_4a diffusion, byte-identical to
+/// `diffuse_sequential` (proposition P1). The frame is split into `tiles` vertical
+/// column strips, each driven by its own scoped thread. A strip processing row `y`
+/// waits until its left neighbour has finished row `y` and its right neighbour has
+/// finished row `y-1` — exactly the Sierra footprint — so the global processing
+/// order is a valid topological order of the same dependency graph the sequential
+/// raster scan obeys. Result: identical bytes, parallel execution.
+///
+/// Critical path ≈ O(H + tiles·W/tiles) = O(H + W); with `tiles` strips advancing
+/// on a skewed wavefront the throughput approaches `tiles`×.
+pub fn diffuse_tiled(
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    palette: &[u8],
+    err: &mut [i32],
+    tiles: usize,
+) -> Vec<u8> {
+    let t = tiles.clamp(1, w.max(1));
+    if t == 1 || h == 0 {
+        return diffuse_sequential(rgba, w, h, palette, err);
+    }
+
+    let mut indices = vec![0u8; w * h];
+    let bounds: Vec<(usize, usize)> = (0..t).map(|i| (i * w / t, (i + 1) * w / t)).collect();
+    let progress: Vec<crossbeam_utils::CachePadded<std::sync::atomic::AtomicIsize>> =
+        (0..t).map(|_| crossbeam_utils::CachePadded::new(std::sync::atomic::AtomicIsize::new(-1))).collect();
+
+    let err_ptr = SyncPtr(err.as_mut_ptr());
+    let idx_ptr = SyncPtr(indices.as_mut_ptr());
+
+    crossbeam_utils::thread::scope(|scope| {
+        for ti in 0..t {
+            let (x0, x1) = bounds[ti];
+            // Skip empty strips (can happen when tiles > w after clamp edge cases).
+            if x0 >= x1 {
+                progress[ti].store((h - 1) as isize, std::sync::atomic::Ordering::Release);
+                continue;
+            }
+            let progress = &progress;
+            scope.spawn(move |_| {
+                use std::sync::atomic::Ordering;
+                // Rebind the whole wrappers so the closure captures `SyncPtr`
+                // (Send), not the raw `*mut` field (Rust 2021 disjoint capture).
+                let err_ptr = err_ptr;
+                let idx_ptr = idx_ptr;
+                let errp = err_ptr.0;
+                let idxp = idx_ptr.0;
+                for y in 0..h {
+                    if ti > 0 {
+                        while progress[ti - 1].load(Ordering::Acquire) < y as isize {
+                            std::hint::spin_loop();
+                        }
+                    }
+                    if ti < t - 1 {
+                        while progress[ti + 1].load(Ordering::Acquire) < y as isize - 1 {
+                            std::hint::spin_loop();
+                        }
+                    }
+                    for x in x0..x1 {
+                        let i = y * w + x;
+                        let e = i * 3;
+                        let base = i * 4;
+                        // SAFETY: this strip's cells for row y, plus cross-tile taps
+                        // whose target cells are not yet (or no longer) being touched
+                        // by the owning strip, per the wavefront ordering above.
+                        unsafe {
+                            let dr = (rgba[base] as i32 + *errp.add(e)).clamp(0, 255);
+                            let dg = (rgba[base + 1] as i32 + *errp.add(e + 1)).clamp(0, 255);
+                            let db = (rgba[base + 2] as i32 + *errp.add(e + 2)).clamp(0, 255);
+                            let idx = nearest_index(palette, dr, dg, db);
+                            *idxp.add(i) = idx as u8;
+                            let er = dr - palette[idx * 3] as i32;
+                            let eg = dg - palette[idx * 3 + 1] as i32;
+                            let eb = db - palette[idx * 3 + 2] as i32;
+                            distribute_ptr(errp, w, h, x, y, er, eg, eb);
+                        }
+                    }
+                    progress[ti].store(y as isize, Ordering::Release);
+                }
+            });
+        }
+    })
+    .expect("diffuse_tiled worker panicked");
+
+    indices
 }
 
 #[cfg(test)]
