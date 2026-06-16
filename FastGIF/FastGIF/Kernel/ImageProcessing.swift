@@ -96,8 +96,12 @@ enum Quality: String, CaseIterable, Identifiable {
         }
     }
 
-    /// `.good` applies an 8×8 ordered Bayer dither before quantization.
+    /// `.good` applies an 8×8 ordered Bayer dither (GPU) before quantization.
     var usesBayer: Bool { self == .good }
+
+    /// `.best` applies deterministic spatial Sierra2_4a diffusion in the Rust
+    /// encoder (`good` already dithered on the GPU; `draft` is nearest-color).
+    var usesDiffusion: Bool { self == .best }
 }
 
 /// 8×8 ordered (Bayer) dither, applied on the GPU before quantization.

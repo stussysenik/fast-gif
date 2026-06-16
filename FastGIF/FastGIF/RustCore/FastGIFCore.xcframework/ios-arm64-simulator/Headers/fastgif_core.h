@@ -49,6 +49,48 @@ GIFOutput *fastgif_encode(
 );
 
 /**
+ * Encode RGBA frames to a GIF using ONE global palette trained over evenly-spaced
+ * frames, plus optional deterministic spatial Sierra2_4a diffusion. This is the
+ * zero-flicker path: a pixel constant across frames maps to a constant index.
+ *
+ * @param frames     Pointer to an array of RawFrame structs.
+ * @param count      Number of frames.
+ * @param colors     Palette size (2–256). Clamped.
+ * @param loop_count 0 = loop infinitely; N = loop N times.
+ * @param quality    NeuQuant sample factor for palette training (1=best, 30=fast).
+ * @param dither     0 = nearest-color; non-zero = spatial Sierra2_4a diffusion.
+ * @return           Heap-allocated GIFOutput, or NULL. Free with fastgif_free().
+ */
+GIFOutput *fastgif_encode_global(
+    const RawFrame *frames,
+    size_t count,
+    uint32_t colors,
+    uint16_t loop_count,
+    int32_t quality,
+    uint8_t dither
+);
+
+/**
+ * Quantize frame `target` against the global palette trained over the whole clip,
+ * returning a palette-reconstructed RawFrame. Exact preview of what
+ * fastgif_encode_global (nearest / draft) ships for that frame.
+ *
+ * @param frames  Pointer to an array of RawFrame structs.
+ * @param count   Number of frames.
+ * @param target  Index of the frame to preview (< count).
+ * @param colors  Palette size (2–256). Clamped.
+ * @param quality NeuQuant sample factor (1=best, 30=fast).
+ * @return        Heap-allocated RawFrame, or NULL. Free with fastgif_raw_frame_free().
+ */
+RawFrame *fastgif_preview_global(
+    const RawFrame *frames,
+    size_t count,
+    size_t target,
+    uint32_t colors,
+    int32_t quality
+);
+
+/**
  * Quantize a single RGBA frame through the same NeuQuant path the GIF encoder
  * uses, returning a palette-reconstructed RawFrame (alpha preserved).
  *

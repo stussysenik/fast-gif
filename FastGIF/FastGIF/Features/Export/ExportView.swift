@@ -130,8 +130,9 @@ struct ExportView: View {
         let fmt = project.exportFormat
         let colors = project.quantizeColors
         let factor = project.quality.sampleFactor
+        let dither = project.quality.usesDiffusion
         guard let processed = try? await pipeline.run(frames) else { return }
-        if let data = try? await Encoder.encode(frames: processed, format: fmt, colors: colors, quality: factor) {
+        if let data = try? await Encoder.encode(frames: processed, format: fmt, colors: colors, quality: factor, dither: dither) {
             estimatedSize = data.count
         }
     }

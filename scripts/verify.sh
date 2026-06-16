@@ -88,8 +88,12 @@ fi
 
 # --- Stage 4: P2 flicker gate (host encode → measure) ---
 say "[4/5] P2 — flicker gate"
+# From C3 on, GIF export routes through the global-palette path; the gate measures
+# what actually ships. Set GLOBAL=0 to measure the legacy per-frame encoder.
+GLOBAL_FLAG=""
+[[ "${GLOBAL:-1}" == "1" ]] && GLOBAL_FLAG="--global"
 if cargo run --quiet --manifest-path "$CORE/Cargo.toml" --bin encode_fixture -- \
-        "$FIX_BIN" "$GIF_OUT" --colors "$COLORS" >/dev/null 2>&1; then
+        "$FIX_BIN" "$GIF_OUT" --colors "$COLORS" $GLOBAL_FLAG >/dev/null 2>&1; then
     if swift tests/validate_gif.swift "$GIF_OUT" \
             --expected-frames 24 --expected-duration 2.88 --alpha "$ALPHA"; then
         record PASS "P2-flicker" "flicker <= max($ALPHA*B0, 0.5)"

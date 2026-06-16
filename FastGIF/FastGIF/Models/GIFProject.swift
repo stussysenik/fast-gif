@@ -140,6 +140,7 @@ final class GIFProject {
             let loops = loopCount
             let colors = quantizeColors
             let factor = quality.sampleFactor
+            let dither = quality.usesDiffusion
             let processed = try await pipeline.run(frames) { [weak self] p in
                 Task { @MainActor in self?.progress = p * 0.8 }
             }
@@ -149,7 +150,8 @@ final class GIFProject {
                 format: fmt,
                 loopCount: loops,
                 colors: colors,
-                quality: factor
+                quality: factor,
+                dither: dither
             )
             progress = 1.0
             return data

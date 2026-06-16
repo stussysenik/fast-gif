@@ -14,7 +14,7 @@
 use std::fs;
 use std::process::exit;
 
-use fastgif_core::{fastgif_encode, fastgif_free, RawFrame};
+use fastgif_core::{fastgif_encode, fastgif_encode_global, fastgif_free, RawFrame};
 
 fn die(msg: &str) -> ! {
     eprintln!("encode_fixture: {msg}");
@@ -76,14 +76,16 @@ fn main() {
         })
         .collect();
 
-    if global {
-        die("--global path requires fastgif_encode_global (lands in C3)");
-    }
-
     // SAFETY: `frames` outlives the call; each `rgba` points to w*h*4 bytes in `data`.
-    let out = unsafe { fastgif_encode(frames.as_ptr(), frames.len(), colors, 0, quality) };
+    // The global path applies spatial Sierra diffusion (dither=1), representing the
+    // `best` export tier the flicker gate measures.
+    let out = if global {
+        unsafe { fastgif_encode_global(frames.as_ptr(), frames.len(), colors, 0, quality, 1) }
+    } else {
+        unsafe { fastgif_encode(frames.as_ptr(), frames.len(), colors, 0, quality) }
+    };
     if out.is_null() {
-        die("fastgif_encode returned null");
+        die("encode returned null");
     }
 
     // SAFETY: `out` is a valid GIFOutput from fastgif_encode.

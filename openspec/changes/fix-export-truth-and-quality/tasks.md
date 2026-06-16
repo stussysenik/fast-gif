@@ -58,14 +58,18 @@ Ordered by commit (C1–C6 from design.md). Each task is independently verifiabl
 
 ## C3 — Global palette + spatial diffusion
 
-- [ ] 3.1 Add `fastgif_encode_global`: sample 8 evenly-spaced frames, train one
+- [x] 3.1 Add `fastgif_encode_global`: sample 8 evenly-spaced frames, train one
   `NeuQuant`, apply globally; init `gif::Encoder` with the global palette.
-- [ ] 3.2 Implement spatial Sierra2_4a (`diffuse::diffuse_sequential`) in **fixed-point**;
-  raster order, zero-seeded error.
-- [ ] 3.3 Route GIF export through `fastgif_encode_global`; thread colors/quality.
-- [ ] 3.4 **Witness P4**: `tests/sampling_sufficiency.rs` —
-  `palette_error(8) ≤ palette_error(4)` on cat-loaf.
-- [ ] 3.5 Flicker gate `α(3)=0.6·B₀` (global palette cuts ≥40%) → GREEN.
+- [x] 3.2 Implement spatial Sierra2_4a (`diffuse::diffuse_sequential`) in **fixed-point**;
+  raster order, zero-seeded error. Shared deterministic integer `nearest_index`
+  lookup (not NeuQuant's network) backs encode + preview + diffusion.
+- [x] 3.3 Route GIF export through `fastgif_encode_global` (`Encoder.encodeGIFGlobal`);
+  thread colors/quality/dither. `best` → Sierra, `good` → GPU Bayer, `draft` → nearest.
+  Added `fastgif_preview_global` so the preview uses the same global palette.
+- [x] 3.4 **Witness P4**: `tests/sampling_sufficiency.rs` —
+  `palette_error(8) ≤ palette_error(4)` on cat-loaf. GREEN.
+- [x] 3.5 Flicker gate `α(3)=0.6·B₀` GREEN (14.52 ≤ 21.55). P3 witness updated to the
+  global path. (Still > `0.3·B₀`=10.77 — temporal carry in C4 closes the rest.)
 
 ## C4 — Temporal carry + scene-cut reset (zero-flicker)
 

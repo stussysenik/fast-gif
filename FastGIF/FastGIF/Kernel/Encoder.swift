@@ -42,12 +42,15 @@ enum Encoder {
 
     // MARK: - GIF (Rust NeuQuant)
 
-    static func encodeGIF(frames: [Frame], loopCount: Int = 0, colors: Int = 256, quality: Int32 = 10) throws -> Data {
-        guard !frames.isEmpty else { throw EncoderError.noFrames }
-
-        // Convert CGImage frames to RGBA pixel buffers for Rust
+    /// Build RGBA `RawFrame` structs from CGImage frames and run `body` while the
+    /// backing buffers are alive. Buffers are freed when `body` returns.
+    private static func withRawFrames<T>(
+        _ frames: [Frame],
+        _ body: ([RawFrame]) throws -> T
+    ) rethrows -> T? {
         var rawFrames: [RawFrame] = []
         var pixelBuffers: [UnsafeMutablePointer<UInt8>] = []
+        defer { pixelBuffers.forEach { $0.deallocate() } }
 
         for frame in frames {
             let w = frame.image.width
@@ -74,24 +77,71 @@ enum Encoder {
             ))
             pixelBuffers.append(buffer)
         }
-        defer { pixelBuffers.forEach { $0.deallocate() } }
 
-        guard !rawFrames.isEmpty else { throw EncoderError.noFrames }
+        guard !rawFrames.isEmpty else { return nil }
+        return try rawFrames.withUnsafeBufferPointer { try body(Array($0)) }
+    }
 
-        guard let result = rawFrames.withUnsafeBufferPointer({ buf in
-            fastgif_encode(
-                buf.baseAddress,
-                buf.count,
-                UInt32(min(max(colors, 2), 256)),
-                UInt16(loopCount),
-                quality // NeuQuant sample factor: 1=best, 30=fastest.
-            )
-        }) else {
-            throw EncoderError.finalizeFailed
-        }
-        defer { fastgif_free(result) }
+    /// Per-frame local-palette GIF encode (legacy path). Retained for the color
+    /// fidelity tests; production GIF export now uses `encodeGIFGlobal`.
+    static func encodeGIF(frames: [Frame], loopCount: Int = 0, colors: Int = 256, quality: Int32 = 10) throws -> Data {
+        guard !frames.isEmpty else { throw EncoderError.noFrames }
+        let result: Data? = try withRawFrames(frames) { raw in
+            raw.withUnsafeBufferPointer { buf -> Data? in
+                guard let out = fastgif_encode(
+                    buf.baseAddress, buf.count,
+                    UInt32(min(max(colors, 2), 256)),
+                    UInt16(loopCount), quality
+                ) else { return nil }
+                defer { fastgif_free(out) }
+                return Data(bytes: out.pointee.data, count: out.pointee.len)
+            }
+        } ?? nil
+        guard let result else { throw EncoderError.finalizeFailed }
+        return result
+    }
 
-        return Data(bytes: result.pointee.data, count: result.pointee.len)
+    /// Global-palette GIF encode — one palette trained over the whole clip, with
+    /// optional spatial Sierra2_4a diffusion. The zero-flicker production path.
+    static func encodeGIFGlobal(
+        frames: [Frame],
+        loopCount: Int = 0,
+        colors: Int = 256,
+        quality: Int32 = 10,
+        dither: Bool = false
+    ) throws -> Data {
+        guard !frames.isEmpty else { throw EncoderError.noFrames }
+        let result: Data? = try withRawFrames(frames) { raw in
+            raw.withUnsafeBufferPointer { buf -> Data? in
+                guard let out = fastgif_encode_global(
+                    buf.baseAddress, buf.count,
+                    UInt32(min(max(colors, 2), 256)),
+                    UInt16(loopCount), quality, dither ? 1 : 0
+                ) else { return nil }
+                defer { fastgif_free(out) }
+                return Data(bytes: out.pointee.data, count: out.pointee.len)
+            }
+        } ?? nil
+        guard let result else { throw EncoderError.finalizeFailed }
+        return result
+    }
+
+    /// Quantize `frames[target]` against the clip's global palette — the exact
+    /// preview of what the global GIF export ships for that frame.
+    static func previewFrameGlobal(frames: [Frame], target: Int, colors: Int, quality: Int32) -> Frame {
+        guard frames.indices.contains(target) else { return frames.first ?? Frame(image: blankImage(), delay: 0.1) }
+        let fallback = frames[target]
+        let out: Frame? = withRawFrames(frames) { raw in
+            raw.withUnsafeBufferPointer { buf -> Frame? in
+                guard let rf = fastgif_preview_global(
+                    buf.baseAddress, buf.count, target,
+                    UInt32(min(max(colors, 2), 256)), quality
+                ) else { return nil }
+                defer { fastgif_raw_frame_free(rf) }
+                return reconstructFrame(rf, delay: fallback.delay)
+            }
+        } ?? nil
+        return out ?? fallback
     }
 
     // MARK: - APNG (iMessage sticker format)
@@ -191,11 +241,12 @@ enum Encoder {
         format: ExportFormat,
         loopCount: Int = 0,
         colors: Int = 256,
-        quality: Int32 = 10
+        quality: Int32 = 10,
+        dither: Bool = false
     ) async throws -> Data {
         switch format {
         case .gif:
-            return try encodeGIF(frames: frames, loopCount: loopCount, colors: colors, quality: quality)
+            return try encodeGIFGlobal(frames: frames, loopCount: loopCount, colors: colors, quality: quality, dither: dither)
         case .apng:
             return try encodeAPNG(frames: frames, loopCount: loopCount)
         case .mp4, .mov:
@@ -235,7 +286,13 @@ enum Encoder {
             UInt32(min(max(colors, 2), 256)), quality
         ) else { return frame }
         defer { fastgif_raw_frame_free(rf) }
+        return reconstructFrame(rf, delay: frame.delay) ?? frame
+    }
 
+    /// Wrap a Rust-returned RawFrame's reconstructed RGBA back into a CGImage.
+    private static func reconstructFrame(_ rf: UnsafePointer<RawFrame>, delay: Double) -> Frame? {
+        let w = Int(rf.pointee.width)
+        let h = Int(rf.pointee.height)
         let outData = Data(bytes: rf.pointee.rgba, count: w * h * 4)
         guard let provider = CGDataProvider(data: outData as CFData),
               let cg = CGImage(
@@ -245,8 +302,19 @@ enum Encoder {
                 space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
                 provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
-              ) else { return frame }
-        return Frame(image: cg, delay: frame.delay)
+              ) else { return nil }
+        return Frame(image: cg, delay: delay)
+    }
+
+    /// 1×1 transparent fallback image (only used if a frame index is invalid).
+    private static func blankImage() -> CGImage {
+        let provider = CGDataProvider(data: Data([0, 0, 0, 0]) as CFData)!
+        return CGImage(
+            width: 1, height: 1, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+        )!
     }
 }
 
