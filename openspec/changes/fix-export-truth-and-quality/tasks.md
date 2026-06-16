@@ -5,21 +5,29 @@ Ordered by commit (C1–C6 from design.md). Each task is independently verifiabl
 
 ## C1 — Provisioning & baseline (lands a *red* gate)
 
-- [ ] 1.1 Add a reference fixture: `tests/fixtures/cat-loaf-3s.mov` (synthetic 3 s
-  gradient-pan, 240×240, 24 fps) + raw RGBA dump `cat-loaf-3s-frames.bin`. Script:
-  `scripts/make-fixture.sh`.
-- [ ] 1.2 Stand up a project-owned dev simulator (`scripts/sim-bootstrap.sh` → writes
-  `scripts/.sim-udid`). [P]
-- [ ] 1.3 Write `scripts/verify.sh`: build Rust, `cargo test`, `flowdeck build`,
-  `flowdeck test`, run flicker metric, print pass/fail per proposition. [P]
-- [ ] 1.4 Implement the flicker metric (Swift or Rust): sample 32×32 center region
-  across all frames, per-pixel RGB variance, averaged. Record
-  `B₀ = flicker(unchanged_encoder(cat_loaf))` into `tests/fixtures/flicker-baseline.txt`;
-  sign with `git hash-object`.
-- [ ] 1.5 Add a binary GIF validator (asserts GIF89a header, frame count, loop block).
-- [ ] 1.6 Add CI gate config (local template) that runs `verify.sh`; it MUST currently
-  **fail** P2/P3 (proves the harness detects the real defects). Validation: `verify.sh`
-  exits non-zero with the flicker assertion as the cause.
+- [x] 1.1 Add a reference fixture: `tests/fixtures/cat-loaf-3s.mov` (240×240, 24 fps)
+  + raw RGBA dump `cat-loaf-3s-frames.bin`. Script: `scripts/make-fixture.sh`.
+  Refined: panning 2-stop gradient (palette contention) + a *static* center
+  (128,128,128) probe — the proposal's byte-identical-pixel defect. Content is
+  procedural/deterministic (no CoreImage RNG) so the signed baseline reproduces.
+  Artifacts are gitignored (regenerable); the script + signed baseline are committed.
+- [x] 1.2 Stand up a project-owned dev simulator (`scripts/sim-bootstrap.sh` → writes
+  `scripts/.sim-udid`, gitignored as machine-specific). Booted FastGIF-Dev iPhone 16 Pro.
+- [x] 1.3 Write `scripts/verify.sh`: build Rust, `cargo test`, host-encode fixture,
+  run flicker metric, baseline tamper-check, print pass/fail per proposition.
+  `flowdeck build`/`test` gated behind `RUN_IOS=1` (needs a booted sim; wired, off by
+  default so the host gate runs fast and CI-portable).
+- [x] 1.4 Implement the flicker metric (`validate_gif.swift`): 32×32 center region,
+  per-pixel RGB variance across frames, averaged. Recorded
+  `B₀ = flicker(unchanged_encoder(cat_loaf)) = 35.91` at 16 colors into
+  `tests/fixtures/flicker-baseline.txt`; signed with `git hash-object`.
+  Note: defect is palette-size-dependent (peaks ~268 @ 8 colors, ~0 @ 48+); anchored
+  at 16 colors (product sticker/emoji tier) where B₀ is robustly above the 0.5 floor.
+- [x] 1.5 Add a binary GIF validator (GIF89a header, frame count, duration ±5%, GCT
+  bit for best mode) — `validate_gif.swift`.
+- [x] 1.6 Add CI gate config (`.github/workflows/verify.yml`) that runs `verify.sh`;
+  currently **fails** P2 (RED). Validation: `verify.sh` exits non-zero (1) with the
+  flicker assertion `35.91 > 0.3·B₀=10.77` as the cause. ✓ proven.
 
 ## C2 — Export truth (one pipeline, honest formats)
 
