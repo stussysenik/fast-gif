@@ -200,15 +200,16 @@ struct ControlsBar: View {
 
                 Divider().frame(height: 40)
 
-                // Dither
+                // Quality
                 VStack(alignment: .leading, spacing: Theme.spacing4) {
-                    Text("Dither").sectionHeader()
-                    Picker("Dither algorithm", selection: $project.ditherAlgorithm) {
-                        ForEach(DitherAlgorithm.allCases) { algo in
-                            Text(algo.rawValue).tag(algo)
+                    Text("Quality").sectionHeader()
+                    Picker("Quality", selection: $project.quality) {
+                        ForEach(Quality.allCases) { q in
+                            Text(q.displayName).tag(q)
                         }
                     }
-                    .pickerStyle(.menu)
+                    .pickerStyle(.segmented)
+                    .frame(width: 200)
                 }
 
                 Divider().frame(height: 40)

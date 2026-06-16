@@ -15,32 +15,26 @@ final class EncoderTests: XCTestCase {
     // MARK: - ExportFormat Tests
 
     func testExportFormatCaseCount() {
-        XCTAssertEqual(ExportFormat.allCases.count, 6)
+        XCTAssertEqual(ExportFormat.allCases.count, 4)
     }
 
     func testExportFormatDisplayNames() {
         XCTAssertEqual(ExportFormat.gif.displayName, "GIF")
         XCTAssertEqual(ExportFormat.apng.displayName, "APNG")
-        XCTAssertEqual(ExportFormat.webp.displayName, "WebP")
         XCTAssertEqual(ExportFormat.mp4.displayName, "MP4")
         XCTAssertEqual(ExportFormat.mov.displayName, "MOV")
-        XCTAssertEqual(ExportFormat.heic.displayName, "HEIC")
     }
 
     func testExportFormatFileExtensions() {
         XCTAssertEqual(ExportFormat.gif.fileExtension, "gif")
         XCTAssertEqual(ExportFormat.apng.fileExtension, "apng")
-        XCTAssertEqual(ExportFormat.webp.fileExtension, "webp")
         XCTAssertEqual(ExportFormat.mp4.fileExtension, "mp4")
         XCTAssertEqual(ExportFormat.mov.fileExtension, "mov")
-        XCTAssertEqual(ExportFormat.heic.fileExtension, "heic")
     }
 
     func testExportFormatTransparency() {
         XCTAssertTrue(ExportFormat.gif.supportsTransparency)
         XCTAssertTrue(ExportFormat.apng.supportsTransparency)
-        XCTAssertTrue(ExportFormat.webp.supportsTransparency)
-        XCTAssertTrue(ExportFormat.heic.supportsTransparency)
         XCTAssertFalse(ExportFormat.mp4.supportsTransparency)
         XCTAssertFalse(ExportFormat.mov.supportsTransparency)
     }
@@ -48,10 +42,8 @@ final class EncoderTests: XCTestCase {
     func testExportFormatUTIs() {
         XCTAssertEqual(ExportFormat.gif.uti as String, kUTTypeGIF as String)
         XCTAssertEqual(ExportFormat.apng.uti as String, "public.png")
-        XCTAssertEqual(ExportFormat.webp.uti as String, "org.webmproject.webp")
         XCTAssertEqual(ExportFormat.mp4.uti as String, kUTTypeMPEG4 as String)
         XCTAssertEqual(ExportFormat.mov.uti as String, kUTTypeQuickTimeMovie as String)
-        XCTAssertEqual(ExportFormat.heic.uti as String, "public.heic")
     }
 
     func testExportFormatIdentifiable() {
@@ -62,13 +54,11 @@ final class EncoderTests: XCTestCase {
 
     func testExportFormatCaseIterable() {
         let allCases = ExportFormat.allCases
-        XCTAssertEqual(allCases.count, 6)
+        XCTAssertEqual(allCases.count, 4)
         XCTAssertTrue(allCases.contains(.gif))
         XCTAssertTrue(allCases.contains(.apng))
-        XCTAssertTrue(allCases.contains(.webp))
         XCTAssertTrue(allCases.contains(.mp4))
         XCTAssertTrue(allCases.contains(.mov))
-        XCTAssertTrue(allCases.contains(.heic))
     }
 
     // MARK: - EncoderError Tests
@@ -169,53 +159,6 @@ final class EncoderTests: XCTestCase {
             // CGImageDestinationCreateWithData with 0 frames still succeeds,
             // but CGImageDestinationFinalize with no added frames fails.
             XCTAssertNotNil(error as? EncoderError)
-        }
-    }
-
-    // MARK: - Encoder WebP / HEIC Tests
-
-    func testEncodeWebPIsStatic() async throws {
-        let frames = Self.makeTestFrames(count: 3)
-
-        // WebP CGImageDestination may not be available on all simulator runtimes.
-        // If unsupported, the encoder throws .formatUnsupported — accept that as a pass.
-        let data: Data
-        do {
-            data = try await Encoder.encode(frames: frames, format: .webp)
-        } catch let error as EncoderError where error == .formatUnsupported {
-            // WebP not supported on this runtime — nothing to assert, test passes
-            return
-        }
-
-        XCTAssertFalse(data.isEmpty, "WebP data should not be empty")
-
-        // WebP should only contain 1 frame (static image, known limitation)
-        // Verify by decoding — CGImageSource for WebP typically reports 1 frame
-        if let source = CGImageSourceCreateWithData(data as CFData, nil) {
-            let count = CGImageSourceGetCount(source)
-            XCTAssertEqual(count, 1, "WebP should encode only the first frame (known limitation)")
-        }
-    }
-
-    func testEncodeHEICIsStatic() async throws {
-        let frames = Self.makeTestFrames(count: 3)
-
-        // HEIC CGImageDestination may not be available on all simulator runtimes.
-        // If unsupported, the encoder throws .formatUnsupported — accept that as a pass.
-        let data: Data
-        do {
-            data = try await Encoder.encode(frames: frames, format: .heic)
-        } catch let error as EncoderError where error == .formatUnsupported {
-            // HEIC not supported on this runtime — nothing to assert, test passes
-            return
-        }
-
-        XCTAssertFalse(data.isEmpty, "HEIC data should not be empty")
-
-        // HEIC should only contain 1 frame (static image, known limitation)
-        if let source = CGImageSourceCreateWithData(data as CFData, nil) {
-            let count = CGImageSourceGetCount(source)
-            XCTAssertEqual(count, 1, "HEIC should encode only the first frame (known limitation)")
         }
     }
 

@@ -49,6 +49,35 @@ GIFOutput *fastgif_encode(
 );
 
 /**
+ * Quantize a single RGBA frame through the same NeuQuant path the GIF encoder
+ * uses, returning a palette-reconstructed RawFrame (alpha preserved).
+ *
+ * Witness for preview↔export parity: given matching `colors` and `quality`,
+ * the returned color set is identical to fastgif_encode's for that frame.
+ *
+ * @param rgba    Pointer to w * h * 4 bytes of RGBA pixel data.
+ * @param w       Frame width in pixels.
+ * @param h       Frame height in pixels.
+ * @param colors  Palette size (2–256). Values outside range are clamped.
+ * @param quality NeuQuant sample factor: 1 = best (slow), 30 = fastest.
+ * @return        Heap-allocated RawFrame, or NULL on failure.
+ *                Caller must free with fastgif_raw_frame_free().
+ */
+RawFrame *fastgif_preview_frame(
+    const uint8_t *rgba,
+    uint32_t w,
+    uint32_t h,
+    uint32_t colors,
+    int32_t quality
+);
+
+/**
+ * Free a RawFrame returned by fastgif_preview_frame.
+ * Safe to call with NULL. Must not be called more than once per pointer.
+ */
+void fastgif_raw_frame_free(RawFrame *rf);
+
+/**
  * Free a GIFOutput returned by fastgif_encode.
  * Safe to call with NULL. Must not be called more than once per pointer.
  */

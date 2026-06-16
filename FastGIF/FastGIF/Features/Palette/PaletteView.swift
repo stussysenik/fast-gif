@@ -21,7 +21,7 @@ struct PaletteView: View {
                 ProgressView("Analyzing...")
             } else {
                 // Color grid
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 8), spacing: 4) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 8), spacing: Theme.spacing4) {
                     ForEach(Array(extractedColors.enumerated()), id: \.offset) { _, color in
                         RoundedRectangle(cornerRadius: 4)
                             .fill(color)

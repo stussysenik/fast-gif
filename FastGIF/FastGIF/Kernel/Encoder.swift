@@ -6,9 +6,11 @@ import UniformTypeIdentifiers
 import MobileCoreServices
 import FastGIFCore
 
-/// All supported export formats.
+/// All supported export formats. WebP/HEIC were removed in the export-truth
+/// change: their CGImageDestination paths silently dropped every frame but the
+/// first, so they could not honestly carry an animation.
 enum ExportFormat: String, CaseIterable, Identifiable {
-    case gif, apng, webp, mp4, mov, heic
+    case gif, apng, mp4, mov
 
     var id: String { rawValue }
 
@@ -16,10 +18,8 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         switch self {
         case .gif: "GIF"
         case .apng: "APNG"
-        case .webp: "WebP"
         case .mp4: "MP4"
         case .mov: "MOV"
-        case .heic: "HEIC"
         }
     }
 
@@ -30,10 +30,8 @@ enum ExportFormat: String, CaseIterable, Identifiable {
         switch self {
         case .gif: kUTTypeGIF
         case .apng: "public.png" as CFString
-        case .webp: "org.webmproject.webp" as CFString
         case .mp4: kUTTypeMPEG4
         case .mov: kUTTypeQuickTimeMovie
-        case .heic: "public.heic" as CFString
         }
     }
 }
@@ -44,7 +42,7 @@ enum Encoder {
 
     // MARK: - GIF (Rust NeuQuant)
 
-    static func encodeGIF(frames: [Frame], loopCount: Int = 0, colors: Int = 256) throws -> Data {
+    static func encodeGIF(frames: [Frame], loopCount: Int = 0, colors: Int = 256, quality: Int32 = 10) throws -> Data {
         guard !frames.isEmpty else { throw EncoderError.noFrames }
 
         // Convert CGImage frames to RGBA pixel buffers for Rust
@@ -86,7 +84,7 @@ enum Encoder {
                 buf.count,
                 UInt32(min(max(colors, 2), 256)),
                 UInt16(loopCount),
-                10 // quality: 1=best, 30=fastest. 10 is good balance.
+                quality // NeuQuant sample factor: 1=best, 30=fastest.
             )
         }) else {
             throw EncoderError.finalizeFailed
@@ -191,11 +189,13 @@ enum Encoder {
     static func encode(
         frames: [Frame],
         format: ExportFormat,
-        loopCount: Int = 0
+        loopCount: Int = 0,
+        colors: Int = 256,
+        quality: Int32 = 10
     ) async throws -> Data {
         switch format {
         case .gif:
-            return try encodeGIF(frames: frames, loopCount: loopCount)
+            return try encodeGIF(frames: frames, loopCount: loopCount, colors: colors, quality: quality)
         case .apng:
             return try encodeAPNG(frames: frames, loopCount: loopCount)
         case .mp4, .mov:
@@ -205,27 +205,48 @@ enum Encoder {
             try await encodeVideo(frames: frames, format: format, outputURL: url)
             defer { try? FileManager.default.removeItem(at: url) }
             return try Data(contentsOf: url)
-        case .webp:
-            let data = NSMutableData()
-            guard let dest = CGImageDestinationCreateWithData(
-                data, format.uti, 1, nil
-            ) else { throw EncoderError.formatUnsupported }
-            if let first = frames.first {
-                CGImageDestinationAddImage(dest, first.image, nil)
-            }
-            guard CGImageDestinationFinalize(dest) else { throw EncoderError.finalizeFailed }
-            return data as Data
-        case .heic:
-            let data = NSMutableData()
-            guard let dest = CGImageDestinationCreateWithData(
-                data, format.uti, 1, nil
-            ) else { throw EncoderError.formatUnsupported }
-            if let first = frames.first {
-                CGImageDestinationAddImage(dest, first.image, nil)
-            }
-            guard CGImageDestinationFinalize(dest) else { throw EncoderError.finalizeFailed }
-            return data as Data
         }
+    }
+
+    // MARK: - Preview (single-frame quantization, exact colors)
+
+    /// Quantize one frame through the Rust preview FFI — the same NeuQuant path
+    /// GIF export uses. Returns a palette-reconstructed frame so the preview
+    /// shows the exact colors the export will ship. Returns the input unchanged
+    /// on any failure. Given matching `colors`/`quality`, the resulting color set
+    /// is identical to `encodeGIF`'s for that frame (witnessed by PreviewParityTests).
+    static func previewFrame(_ frame: Frame, colors: Int, quality: Int32) -> Frame {
+        let w = frame.image.width
+        let h = frame.image.height
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: w * h * 4)
+        defer { buffer.deallocate() }
+        guard let ctx = CGContext(
+            data: buffer,
+            width: w, height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return frame }
+        ctx.draw(frame.image, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        guard let rf = fastgif_preview_frame(
+            buffer, UInt32(w), UInt32(h),
+            UInt32(min(max(colors, 2), 256)), quality
+        ) else { return frame }
+        defer { fastgif_raw_frame_free(rf) }
+
+        let outData = Data(bytes: rf.pointee.rgba, count: w * h * 4)
+        guard let provider = CGDataProvider(data: outData as CFData),
+              let cg = CGImage(
+                width: w, height: h,
+                bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: w * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+              ) else { return frame }
+        return Frame(image: cg, delay: frame.delay)
     }
 }
 

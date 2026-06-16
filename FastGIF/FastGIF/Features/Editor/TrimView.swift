@@ -35,7 +35,7 @@ struct TrimView: View {
 
                     // Start handle
                     TrimHandle(color: Theme.accent)
-                        .offset(x: CGFloat(startFrac) * width - 8)
+                        .offset(x: min(max(CGFloat(startFrac) * width - 8, 0), width - 16))
                         .gesture(DragGesture()
                             .onChanged { v in
                                 let frac = max(0, min(v.location.x / width, effectiveEnd / project.videoDuration - 0.01))
@@ -48,7 +48,7 @@ struct TrimView: View {
 
                     // End handle
                     TrimHandle(color: Theme.accent)
-                        .offset(x: CGFloat(endFrac) * width - 8)
+                        .offset(x: min(max(CGFloat(endFrac) * width - 8, 0), width - 16))
                         .gesture(DragGesture()
                             .onChanged { v in
                                 let frac = max(project.trimStart / project.videoDuration + 0.01, min(v.location.x / width, 1))
@@ -88,9 +88,9 @@ struct TrimHandle: View {
     let color: Color
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 3)
+        RoundedRectangle(cornerRadius: Theme.radiusSmall)
             .fill(color)
-            .frame(width: 16, height: 44)
-            .contentShape(Rectangle().inset(by: -10))
+            .frame(width: 16, height: 36)
+            .contentShape(Rectangle().inset(by: -14))
     }
 }

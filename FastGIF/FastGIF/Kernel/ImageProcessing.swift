@@ -53,83 +53,136 @@ struct Resize: Stage {
     }
 }
 
-/// Quantize colors — reduce palette for GIF encoding.
-struct Quantize: Stage {
+/// Resize fitting the long edge to `maxEdge`, preserving the source aspect ratio.
+/// Never upscales. This is the aspect-correct replacement for the old square
+/// `Resize(maxWidth × maxWidth)` used by both preview and export.
+struct AspectResize: Stage {
+    let maxEdge: Int
+
+    func process(_ frames: [Frame]) async throws -> [Frame] {
+        guard let first = frames.first else { return [] }
+        let srcW = first.width
+        let srcH = first.height
+        let longEdge = max(srcW, srcH)
+        let scale = longEdge > maxEdge ? Double(maxEdge) / Double(longEdge) : 1.0
+        let targetW = max(1, Int((Double(srcW) * scale).rounded()))
+        let targetH = max(1, Int((Double(srcH) * scale).rounded()))
+        return try await Resize(targetSize: CGSize(width: targetW, height: targetH)).process(frames)
+    }
+}
+
+/// Output quality preset. Replaces the old (placebo) dither-algorithm picker.
+/// Maps to the Rust encoder's NeuQuant sample factor and, for `.good`, an
+/// ordered Bayer dither applied on the GPU before quantization.
+enum Quality: String, CaseIterable, Identifiable {
+    case draft, good, best
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .draft: "Draft"
+        case .good: "Good"
+        case .best: "Best"
+        }
+    }
+
+    /// NeuQuant sample factor passed across the FFI: 1 = best/slowest, 30 = fastest.
+    var sampleFactor: Int32 {
+        switch self {
+        case .draft: 30
+        case .good: 10
+        case .best: 1
+        }
+    }
+
+    /// `.good` applies an 8×8 ordered Bayer dither before quantization.
+    var usesBayer: Bool { self == .good }
+}
+
+/// 8×8 ordered (Bayer) dither, applied on the GPU before quantization.
+/// Used only by `Quality.good`. Adds a deterministic, position-dependent
+/// threshold pattern so flat regions break into a stable stipple instead of
+/// banding once the palette is reduced. Unlike the deleted `Dither` stage this
+/// is real (no RNG) and reproducible.
+struct BayerDither: Stage {
     let colors: Int
 
-    init(colors: Int = 256) {
+    init(colors: Int) {
         self.colors = min(max(colors, 2), 256)
     }
 
+    /// Recursive 8×8 Bayer matrix, normalized to [0, 1).
+    private static let matrix: [Float] = {
+        let base: [[Int]] = [
+            [ 0, 32,  8, 40,  2, 34, 10, 42],
+            [48, 16, 56, 24, 50, 18, 58, 26],
+            [12, 44,  4, 36, 14, 46,  6, 38],
+            [60, 28, 52, 20, 62, 30, 54, 22],
+            [ 3, 35, 11, 43,  1, 33,  9, 41],
+            [51, 19, 59, 27, 49, 17, 57, 25],
+            [15, 47,  7, 39, 13, 45,  5, 37],
+            [63, 31, 55, 23, 61, 29, 53, 21]
+        ]
+        return base.flatMap { $0 }.map { (Float($0) + 0.5) / 64.0 }
+    }()
+
     func process(_ frames: [Frame]) async throws -> [Frame] {
         let context = CIContext(options: [.useSoftwareRenderer: false])
-        let levels = NSNumber(value: max(2, Int(log2(Double(colors)))))
+        guard let tile = Self.makeTileImage() else { return frames }
+        // Amplitude ≈ one quantization step per channel. NeuQuant builds a 3-D
+        // palette, so per-channel resolution ≈ cbrt(colors) levels.
+        let levels = max(2.0, pow(Double(colors), 1.0 / 3.0))
+        let amplitude = CGFloat(1.0 / levels)
+
         var result = [Frame]()
         result.reserveCapacity(frames.count)
         for frame in frames {
             let processed: Frame = autoreleasepool {
                 let ci = CIImage(cgImage: frame.image)
-                guard let filter = CIFilter(name: "CIColorPosterize") else { return frame }
-                filter.setValue(ci, forKey: kCIInputImageKey)
-                filter.setValue(levels, forKey: "inputLevels")
-                guard let output = filter.outputImage,
-                      let cgImage = context.createCGImage(output, from: output.extent) else { return frame }
-                return Frame(image: cgImage, delay: frame.delay)
-            }
-            result.append(processed)
-            await Task.yield()
-        }
-        return result
-    }
-}
-
-/// Dithering algorithms for reducing color banding.
-enum DitherAlgorithm: String, CaseIterable, Identifiable {
-    case floydSteinberg = "Floyd-Steinberg"
-    case ordered = "Ordered"
-    case bayer = "Bayer"
-    case none = "None"
-
-    var id: String { rawValue }
-}
-
-struct Dither: Stage {
-    let algorithm: DitherAlgorithm
-    let strength: Float
-
-    init(_ algorithm: DitherAlgorithm = .floydSteinberg, strength: Float = 1.0) {
-        self.algorithm = algorithm
-        self.strength = strength
-    }
-
-    func process(_ frames: [Frame]) async throws -> [Frame] {
-        guard algorithm != .none else { return frames }
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        let s = strength
-        var result = [Frame]()
-        result.reserveCapacity(frames.count)
-        for frame in frames {
-            let processed: Frame = autoreleasepool {
-                let ci = CIImage(cgImage: frame.image)
-                guard let noise = CIFilter(name: "CIRandomGenerator"),
-                      let noiseOutput = noise.outputImage else { return frame }
-                let noiseImage = noiseOutput
+                // offset = (tile − 0.5) · amplitude, tiled across the frame.
+                let offset = tile
+                    .applyingFilter("CIAffineTile", parameters: [
+                        kCIInputTransformKey: CGAffineTransform.identity
+                    ])
                     .cropped(to: ci.extent)
                     .applyingFilter("CIColorMatrix", parameters: [
-                        "inputRVector": CIVector(x: CGFloat(s * 0.05), y: 0, z: 0, w: 0),
-                        "inputGVector": CIVector(x: 0, y: CGFloat(s * 0.05), z: 0, w: 0),
-                        "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(s * 0.05), w: 0)
+                        "inputRVector": CIVector(x: amplitude, y: 0, z: 0, w: 0),
+                        "inputGVector": CIVector(x: 0, y: amplitude, z: 0, w: 0),
+                        "inputBVector": CIVector(x: 0, y: 0, z: amplitude, w: 0),
+                        "inputBiasVector": CIVector(x: -amplitude / 2, y: -amplitude / 2, z: -amplitude / 2, w: 0)
                     ])
                 let dithered = ci.applyingFilter("CIAdditionCompositing", parameters: [
-                    kCIInputBackgroundImageKey: noiseImage
+                    kCIInputBackgroundImageKey: offset
                 ])
-                guard let cgImage = context.createCGImage(dithered, from: dithered.extent) else { return frame }
+                guard let cgImage = context.createCGImage(dithered, from: ci.extent) else { return frame }
                 return Frame(image: cgImage, delay: frame.delay)
             }
             result.append(processed)
             await Task.yield()
         }
         return result
+    }
+
+    /// Build the 8×8 Bayer threshold texture as a CIImage (grayscale, 0..1).
+    private static func makeTileImage() -> CIImage? {
+        let n = 8
+        var bytes = [UInt8](repeating: 0, count: n * n * 4)
+        for i in 0..<(n * n) {
+            let v = UInt8((matrix[i] * 255).rounded())
+            bytes[i * 4] = v
+            bytes[i * 4 + 1] = v
+            bytes[i * 4 + 2] = v
+            bytes[i * 4 + 3] = 255
+        }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let cg = CGImage(
+                width: n, height: n, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: n * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+              ) else { return nil }
+        return CIImage(cgImage: cg)
     }
 }
 

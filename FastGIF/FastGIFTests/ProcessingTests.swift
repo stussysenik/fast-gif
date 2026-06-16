@@ -75,33 +75,75 @@ final class ProcessingTests: XCTestCase {
         }
     }
 
-    // MARK: - Quantize Tests
+    // MARK: - AspectResize Tests
 
-    func testQuantizeClampsColorsMin() async throws {
-        let stage = Quantize(colors: -5)
-        // Clamped to 2 internally; verify it processes without error
-        let frames = [Self.makeTestFrame()]
+    func testAspectResizeFitsLongEdgeAndPreservesRatio() async throws {
+        // 100×50 source, maxEdge 20 → 20×10 (aspect preserved, long edge fit).
+        let stage = AspectResize(maxEdge: 20)
+        let frames = [Self.makeTestFrame(width: 100, height: 50)]
         let output = try await stage.process(frames)
         XCTAssertEqual(output.count, 1)
+        XCTAssertEqual(output[0].width, 20)
+        XCTAssertEqual(output[0].height, 10)
     }
 
-    func testQuantizeClampsColorsMax() async throws {
-        let stage = Quantize(colors: 500)
-        // Clamped to 256 internally; verify it processes without error
-        let frames = [Self.makeTestFrame()]
+    func testAspectResizePortraitOrientation() async throws {
+        // 50×100 source, maxEdge 20 → 10×20.
+        let stage = AspectResize(maxEdge: 20)
+        let frames = [Self.makeTestFrame(width: 50, height: 100)]
         let output = try await stage.process(frames)
-        XCTAssertEqual(output.count, 1)
+        XCTAssertEqual(output[0].width, 10)
+        XCTAssertEqual(output[0].height, 20)
     }
 
-    func testQuantizePreservesFrameCount() async throws {
-        let stage = Quantize(colors: 64)
-        let frames = Array(repeating: Self.makeTestFrame(), count: 5)
+    func testAspectResizeNeverUpscales() async throws {
+        // 10×10 source, maxEdge 100 → unchanged 10×10.
+        let stage = AspectResize(maxEdge: 100)
+        let frames = [Self.makeTestFrame(width: 10, height: 10)]
         let output = try await stage.process(frames)
-        XCTAssertEqual(output.count, 5)
+        XCTAssertEqual(output[0].width, 10)
+        XCTAssertEqual(output[0].height, 10)
     }
 
-    func testQuantizePreservesDelay() async throws {
-        let stage = Quantize(colors: 16)
+    func testAspectResizeEmptyInput() async throws {
+        let stage = AspectResize(maxEdge: 64)
+        let output = try await stage.process([])
+        XCTAssertTrue(output.isEmpty)
+    }
+
+    // MARK: - Quality Tests
+
+    func testQualityCaseCount() {
+        XCTAssertEqual(Quality.allCases.count, 3)
+    }
+
+    func testQualitySampleFactorOrdering() {
+        // Lower sample factor = higher quality. best < good < draft.
+        XCTAssertLessThan(Quality.best.sampleFactor, Quality.good.sampleFactor)
+        XCTAssertLessThan(Quality.good.sampleFactor, Quality.draft.sampleFactor)
+    }
+
+    func testQualityOnlyGoodUsesBayer() {
+        XCTAssertTrue(Quality.good.usesBayer)
+        XCTAssertFalse(Quality.draft.usesBayer)
+        XCTAssertFalse(Quality.best.usesBayer)
+    }
+
+    // MARK: - BayerDither Tests
+
+    func testBayerDitherPreservesDimensionsAndCount() async throws {
+        let stage = BayerDither(colors: 16)
+        let frames = Array(repeating: Self.makeTestFrame(width: 32, height: 32), count: 3)
+        let output = try await stage.process(frames)
+        XCTAssertEqual(output.count, 3)
+        for frame in output {
+            XCTAssertEqual(frame.width, 32)
+            XCTAssertEqual(frame.height, 32)
+        }
+    }
+
+    func testBayerDitherPreservesDelay() async throws {
+        let stage = BayerDither(colors: 32)
         let frames = [
             Self.makeTestFrame(delay: 0.05),
             Self.makeTestFrame(delay: 0.2)
@@ -109,68 +151,6 @@ final class ProcessingTests: XCTestCase {
         let output = try await stage.process(frames)
         XCTAssertEqual(output[0].delay, 0.05)
         XCTAssertEqual(output[1].delay, 0.2)
-    }
-
-    func testQuantizeEmptyInput() async throws {
-        let stage = Quantize(colors: 256)
-        let output = try await stage.process([])
-        XCTAssertTrue(output.isEmpty)
-    }
-
-    // MARK: - Dither Tests
-
-    func testDitherNoneIsPassthrough() async throws {
-        let stage = Dither(.none)
-        let frames = [
-            Self.makeTestFrame(delay: 0.1),
-            Self.makeTestFrame(delay: 0.2)
-        ]
-        let output = try await stage.process(frames)
-        XCTAssertEqual(output.count, frames.count)
-        // When algorithm is .none, the original array is returned directly
-        // so CGImage references should be identical
-        for i in 0..<output.count {
-            XCTAssertTrue(output[i].image === frames[i].image,
-                          "Frame \(i) image reference should be identical for .none dither")
-            XCTAssertEqual(output[i].delay, frames[i].delay)
-        }
-    }
-
-    func testDitherPreservesFrameCount() async throws {
-        let stage = Dither(.floydSteinberg)
-        let frames = Array(repeating: Self.makeTestFrame(), count: 4)
-        let output = try await stage.process(frames)
-        XCTAssertEqual(output.count, 4)
-    }
-
-    func testDitherPreservesDelay() async throws {
-        let stage = Dither(.floydSteinberg)
-        let frames = [
-            Self.makeTestFrame(delay: 0.05),
-            Self.makeTestFrame(delay: 0.15)
-        ]
-        let output = try await stage.process(frames)
-        XCTAssertEqual(output[0].delay, 0.05)
-        XCTAssertEqual(output[1].delay, 0.15)
-    }
-
-    func testDitherAllCases() async throws {
-        for algorithm in DitherAlgorithm.allCases {
-            let stage = Dither(algorithm)
-            let frames = [Self.makeTestFrame()]
-            let output = try await stage.process(frames)
-            XCTAssertEqual(output.count, 1, "Failed for algorithm: \(algorithm.rawValue)")
-        }
-    }
-
-    func testDitherAlgorithmCaseCount() {
-        XCTAssertEqual(DitherAlgorithm.allCases.count, 4)
-    }
-
-    func testDitherAlgorithmIdentifiable() {
-        for algorithm in DitherAlgorithm.allCases {
-            XCTAssertEqual(algorithm.id, algorithm.rawValue)
-        }
     }
 
     // MARK: - Speed Tests

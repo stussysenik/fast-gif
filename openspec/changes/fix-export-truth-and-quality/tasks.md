@@ -31,21 +31,30 @@ Ordered by commit (C1–C6 from design.md). Each task is independently verifiabl
 
 ## C2 — Export truth (one pipeline, honest formats)
 
-- [ ] 2.1 Introduce `Quality { draft, good, best }`; delete `DitherAlgorithm` and the
+- [x] 2.1 Introduce `Quality { draft, good, best }`; delete `DitherAlgorithm` and the
   `Dither` + `Quantize` Swift stages (`ImageProcessing.swift`).
-- [ ] 2.2 Add `BayerDither` as an 8×8 Metal `CIColorKernel` used only by `good`. [P]
-- [ ] 2.3 Replace square Resize with `AspectResize(maxEdge:)`; update both call sites.
-- [ ] 2.4 Collapse preview/export to a single `buildPipeline(scale:)`; preview differs
+- [x] 2.2 Add `BayerDither` (8×8 ordered) used only by `good`. [P]
+  Implemented as GPU `CIFilter` composition (Bayer texture → `CIAffineTile` →
+  `CIColorMatrix` bias → `CIAdditionCompositing`) rather than a custom
+  `CIColorKernel`: a position-dependent pattern can't be expressed in a
+  coordinate-free `CIColorKernel`, and runtime Metal-CIKernel needs a prebuilt
+  metallib. The chosen path is GPU-side, deterministic (no RNG), dependency-free.
+- [x] 2.3 Replace square Resize with `AspectResize(maxEdge:)`; both pipeline call sites
+  now go through `buildPipeline(scale:)`. (`Resize` retained for explicit-size users:
+  StickerOptimizer, tests.)
+- [x] 2.4 Collapse preview/export to a single `buildPipeline(scale:)`; preview differs
   only by resolution + still-frame sampling.
-- [ ] 2.5 Thread `quantizeColors` and `quality` from `export()` → `Encoder.encode` →
-  `encodeGIF` → FFI (remove the hardcoded `256`/`10` at `Encoder.swift:87,89`).
-- [ ] 2.6 Add `fastgif_preview_frame` FFI (single-frame quantization) + Swift binding.
-- [ ] 2.7 Remove WebP and HEIC from `ExportFormat`; delete their encoders; update the
+- [x] 2.5 Thread `quantizeColors` and `quality` from `export()` → `Encoder.encode` →
+  `encodeGIF` → FFI (removed the hardcoded `256`/`10`).
+- [x] 2.6 Add `fastgif_preview_frame` FFI (single-frame quantization, now `quality`-aware
+  so parity is true by construction) + `Encoder.previewFrame` Swift binding.
+- [x] 2.7 Remove WebP and HEIC from `ExportFormat`; delete their encoders; update the
   format taxonomy to GIF/APNG/MP4/MOV.
-- [ ] 2.8 Enforce a duration cap at import; surface the reason in `ImportView`.
-- [ ] 2.9 **Witness P3**: `PreviewParityTests.swift` asserts
-  `preview_color_set(frame) ≡ export_color_set(frame, .draft)` on cat-loaf frames.
-- [ ] 2.10 Flicker gate `α(2)=1.0` (don't regress); P3 now GREEN.
+- [x] 2.8 Enforce a 15 s duration cap at import; surface the reason in `ImportView`.
+- [x] 2.9 **Witness P3**: `PreviewParityTests.swift` asserts
+  `preview_color_set(frame) ≡ export_color_set(frame, .draft)` (gradient frame, across
+  8/16/32/64 colors). GREEN: 91/91 iOS tests pass.
+- [x] 2.10 Flicker gate `α(2)=1.0` (don't regress) GREEN (35.908 ≤ 35.908); P3 GREEN.
 
 ## C3 — Global palette + spatial diffusion
 
