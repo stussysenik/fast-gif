@@ -110,9 +110,12 @@ struct BatchView: View {
         isProcessing = true
         results = []
 
-        let pipeline = project.buildPipeline()
+        let pipeline = project.buildPipeline(scale: .export)
         let format = project.exportFormat
         let loopCount = project.loopCount
+        let colors = project.quantizeColors
+        let factor = project.quality.sampleFactor
+        let dither = project.quality.usesDiffusion
 
         for url in inputURLs {
             let accessing = url.startAccessingSecurityScopedResource()
@@ -128,7 +131,7 @@ struct BatchView: View {
                 }
 
                 let processed = try await pipeline.run(frames)
-                let data = try await Encoder.encode(frames: processed, format: format, loopCount: loopCount)
+                let data = try await Encoder.encode(frames: processed, format: format, loopCount: loopCount, colors: colors, quality: factor, dither: dither)
 
                 let outputURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent(url.deletingPathExtension().lastPathComponent)

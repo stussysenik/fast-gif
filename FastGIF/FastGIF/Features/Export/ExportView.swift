@@ -24,11 +24,6 @@ struct ExportView: View {
                                     .font(.caption.monospaced())
                                     .foregroundStyle(Theme.textSecondary)
                             }
-                            if format == .webp || format == .heic {
-                                Text("Static")
-                                    .font(.caption2)
-                                    .foregroundStyle(Theme.textTertiary)
-                            }
                             if project.exportFormat == format {
                                 Image(systemName: "checkmark")
                                     .foregroundStyle(Theme.accent)
@@ -130,11 +125,14 @@ struct ExportView: View {
     private func estimateSize() async {
         guard project.hasFrames else { return }
         estimatedSize = nil
-        let pipeline = project.buildPipeline()
+        let pipeline = project.buildPipeline(scale: .export)
         let frames = project.frames
         let fmt = project.exportFormat
+        let colors = project.quantizeColors
+        let factor = project.quality.sampleFactor
+        let dither = project.quality.usesDiffusion
         guard let processed = try? await pipeline.run(frames) else { return }
-        if let data = try? await Encoder.encode(frames: processed, format: fmt) {
+        if let data = try? await Encoder.encode(frames: processed, format: fmt, colors: colors, quality: factor, dither: dither) {
             estimatedSize = data.count
         }
     }
@@ -187,9 +185,7 @@ struct ExportView: View {
         switch format {
         case .gif: "play.rectangle"
         case .apng: "photo.stack"
-        case .webp: "globe"
         case .mp4, .mov: "film"
-        case .heic: "square.stack.3d.up"
         }
     }
 }

@@ -9,6 +9,56 @@ use std::borrow::Cow;
 use std::ptr;
 use std::slice;
 
+pub mod diffuse;
+
+/// Evenly-spaced sample indices into `count` frames, capped at `max` samples.
+/// Used to train one global palette over a representative subset of the clip.
+fn sample_indices(count: usize, max: usize) -> Vec<usize> {
+    if count <= max {
+        return (0..count).collect();
+    }
+    (0..max)
+        .map(|k| (k * (count - 1)) / (max - 1))
+        .collect()
+}
+
+/// Train one NeuQuant over up to `max_samples` evenly-spaced frames and return
+/// the packed RGB palette (`colors*3` bytes). This is the global palette that
+/// kills per-frame palette flicker: a static pixel maps to the *same* entry in
+/// every frame. Safe, slice-based API so the verification harness can measure
+/// sampling sufficiency (proposition P4).
+pub fn train_palette(
+    frames: &[&[u8]],
+    num_colors: usize,
+    sample_fac: i32,
+    max_samples: usize,
+) -> Vec<u8> {
+    let idxs = sample_indices(frames.len(), max_samples.max(1));
+    let mut combined: Vec<u8> = Vec::new();
+    for &n in &idxs {
+        combined.extend_from_slice(frames[n]);
+    }
+    let nc = num_colors.clamp(2, 256);
+    let nq = color_quant::NeuQuant::new(sample_fac.clamp(1, 30), nc, &combined);
+    nq.color_map_rgb()
+}
+
+/// Train the 8-sample global palette over `RawFrame`s (the encoder's path).
+unsafe fn train_global_palette(
+    raw_frames: &[RawFrame],
+    num_colors: usize,
+    sample_fac: i32,
+) -> Vec<u8> {
+    let slices: Vec<&[u8]> = raw_frames
+        .iter()
+        .map(|rf| {
+            let px = (rf.width * rf.height) as usize * 4;
+            slice::from_raw_parts(rf.rgba, px)
+        })
+        .collect();
+    train_palette(&slices, num_colors, sample_fac, 8)
+}
+
 /// Input frame: raw RGBA pixels + timing.
 #[repr(C)]
 pub struct RawFrame {
@@ -115,6 +165,234 @@ pub unsafe extern "C" fn fastgif_encode(
     };
 
     Box::into_raw(Box::new(GIFOutput { data, len }))
+}
+
+/// Encode RGBA frames into a GIF using ONE global palette trained over evenly-
+/// spaced frames, plus optional deterministic spatial Sierra2_4a diffusion.
+///
+/// This is the zero-flicker path: every frame is quantized against the same
+/// palette, so a pixel that is constant across frames maps to a constant index.
+///
+/// # Parameters
+/// - `colors`: palette size (2–256; clamped)
+/// - `loop_count`: 0 = infinite; N>0 = loop N times
+/// - `quality`: NeuQuant sample factor for palette training (1=best, 30=fastest)
+/// - `dither`: 0 = nearest-color; non-zero = spatial Sierra2_4a diffusion
+/// - `cancel`: optional pointer to a flag byte. Checked before each frame; if it
+///   becomes non-zero the encode aborts and returns null. Pass null to disable.
+///   Lets a superseded export be abandoned mid-encode (a sibling task flips it).
+///
+/// # Safety
+/// Same contract as `fastgif_encode`. `cancel`, if non-null, must point to a byte
+/// valid for the duration of the call. Returns null on failure/cancel; free with
+/// `fastgif_free`.
+#[no_mangle]
+pub unsafe extern "C" fn fastgif_encode_global(
+    frames_ptr: *const RawFrame,
+    count: usize,
+    colors: u32,
+    loop_count: u16,
+    quality: i32,
+    dither: u8,
+    cancel: *const u8,
+) -> *mut GIFOutput {
+    if frames_ptr.is_null() || count == 0 {
+        return ptr::null_mut();
+    }
+    let raw_frames = slice::from_raw_parts(frames_ptr, count);
+    let w = raw_frames[0].width as u16;
+    let h = raw_frames[0].height as u16;
+    let num_colors = (colors as usize).clamp(2, 256);
+    let sample_fac = quality.clamp(1, 30);
+
+    let palette = train_global_palette(raw_frames, num_colors, sample_fac);
+
+    let mut buf: Vec<u8> = Vec::with_capacity(count * 4096);
+    let result = (|| -> Result<(), gif::EncodingError> {
+        let mut enc = gif::Encoder::new(&mut buf, w, h, &palette)?;
+        let repeat = if loop_count == 0 {
+            gif::Repeat::Infinite
+        } else {
+            gif::Repeat::Finite(loop_count)
+        };
+        enc.set_repeat(repeat)?;
+
+        // Temporal carry: the diffusion error buffer is threaded frame→frame so the
+        // dither pattern is temporally coherent (kills the shimmer that spatial-only
+        // diffusion bleeds from moving regions into static ones). A scene cut resets
+        // the carry so a hard cut doesn't smear.
+        let mut carry: Vec<i32> = vec![0i32; (w as usize) * (h as usize) * 3];
+        let mut prev: Option<&[u8]> = None;
+
+        for rf in raw_frames {
+            // Cooperative cancellation: bail before spending work on this frame.
+            if !cancel.is_null() && ptr::read_volatile(cancel) != 0 {
+                return Err(gif::EncodingError::from(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                )));
+            }
+            let fw = rf.width as usize;
+            let fh = rf.height as usize;
+            let rgba = slice::from_raw_parts(rf.rgba, fw * fh * 4);
+
+            let indices = if dither != 0 {
+                if carry.len() != fw * fh * 3 {
+                    carry = vec![0i32; fw * fh * 3]; // dims changed; restart carry
+                } else if let Some(p) = prev {
+                    if p.len() == rgba.len() && diffuse::scene_changed(p, rgba) {
+                        carry.iter_mut().for_each(|e| *e = 0);
+                    }
+                }
+                diffuse::diffuse_temporal(rgba, fw, fh, &palette, &mut carry)
+            } else {
+                diffuse::map_nearest(rgba, &palette)
+            };
+            prev = Some(rgba);
+
+            let mut frame = gif::Frame::default();
+            frame.width = rf.width as u16;
+            frame.height = rf.height as u16;
+            frame.delay = rf.delay_cs;
+            frame.palette = None; // use the global palette
+            frame.buffer = Cow::Owned(indices);
+            enc.write_frame(&frame)?;
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        return ptr::null_mut();
+    }
+
+    let len = buf.len();
+    let data = {
+        let mut boxed = buf.into_boxed_slice();
+        let p = boxed.as_mut_ptr();
+        std::mem::forget(boxed);
+        p
+    };
+    Box::into_raw(Box::new(GIFOutput { data, len }))
+}
+
+/// Quantize frame `target` against the global palette trained over the whole
+/// clip, returning a palette-reconstructed RawFrame. This is the exact preview
+/// of what `fastgif_encode_global` (nearest / `draft`) will ship for that frame —
+/// same palette, same `nearest_index` lookup, so the color sets are identical by
+/// construction (witnessed by PreviewParityTests).
+///
+/// # Safety
+/// Same contract as `fastgif_encode`. Returns null on failure; free with
+/// `fastgif_raw_frame_free`.
+#[no_mangle]
+pub unsafe extern "C" fn fastgif_preview_global(
+    frames_ptr: *const RawFrame,
+    count: usize,
+    target: usize,
+    colors: u32,
+    quality: i32,
+) -> *mut RawFrame {
+    if frames_ptr.is_null() || count == 0 || target >= count {
+        return ptr::null_mut();
+    }
+    let raw_frames = slice::from_raw_parts(frames_ptr, count);
+    let num_colors = (colors as usize).clamp(2, 256);
+    let sample_fac = quality.clamp(1, 30);
+    let palette = train_global_palette(raw_frames, num_colors, sample_fac);
+
+    let rf = &raw_frames[target];
+    let w = rf.width;
+    let h = rf.height;
+    let n_px = (w as usize) * (h as usize);
+    let input = slice::from_raw_parts(rf.rgba, n_px * 4);
+
+    let mut out_pixels = vec![0u8; n_px * 4];
+    for (dst, src) in out_pixels.chunks_exact_mut(4).zip(input.chunks_exact(4)) {
+        let idx = diffuse::nearest_index(&palette, src[0] as i32, src[1] as i32, src[2] as i32);
+        dst[0] = palette[idx * 3];
+        dst[1] = palette[idx * 3 + 1];
+        dst[2] = palette[idx * 3 + 2];
+        dst[3] = src[3];
+    }
+
+    let mut boxed = out_pixels.into_boxed_slice();
+    let rgba_ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    Box::into_raw(Box::new(RawFrame {
+        rgba: rgba_ptr,
+        width: w,
+        height: h,
+        delay_cs: 0,
+    }))
+}
+
+/// Runs one-frame NeuQuant on `rgba` and returns a RawFrame whose pixels are
+/// the palette-reconstructed image. Preserves alpha. Caller frees with
+/// `fastgif_raw_frame_free`.
+///
+/// This is the witness for §P3 (preview_parity): it goes through the same
+/// `NeuQuant::new(quality, colors, ..)` + `index_of` pipeline as `fastgif_encode`,
+/// so when the preview and the draft export are given the *same* `colors` and
+/// `quality` the resulting color sets are identical by construction.
+///
+/// # Safety
+/// - `rgba` must point to `w * h * 4` bytes.
+/// - Returns null on bad input; caller must free with `fastgif_raw_frame_free`.
+#[no_mangle]
+pub unsafe extern "C" fn fastgif_preview_frame(
+    rgba: *const u8,
+    w: u32,
+    h: u32,
+    colors: u32,
+    quality: i32,
+) -> *mut RawFrame {
+    if rgba.is_null() || w == 0 || h == 0 {
+        return ptr::null_mut();
+    }
+    let n_px = (w as usize) * (h as usize);
+    let input = slice::from_raw_parts(rgba, n_px * 4);
+    let num_colors = (colors as usize).clamp(2, 256);
+    let sample_fac = quality.clamp(1, 30);
+    let nq = color_quant::NeuQuant::new(sample_fac, num_colors, input);
+
+    // Build palette-reconstructed RGBA so the caller sees the exact post-quantize
+    // pixels the GIF would carry.
+    let mut out_pixels = vec![0u8; n_px * 4];
+    let palette = nq.color_map_rgb();
+    for (dst, src) in out_pixels.chunks_exact_mut(4).zip(input.chunks_exact(4)) {
+        let idx = nq.index_of(src);
+        let base = idx * 3;
+        dst[0] = palette[base];
+        dst[1] = palette[base + 1];
+        dst[2] = palette[base + 2];
+        dst[3] = src[3]; // preserve alpha
+    }
+
+    let mut boxed = out_pixels.into_boxed_slice();
+    let rgba_ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+
+    Box::into_raw(Box::new(RawFrame {
+        rgba: rgba_ptr,
+        width: w,
+        height: h,
+        delay_cs: 0,
+    }))
+}
+
+/// Free a `RawFrame` returned by `fastgif_preview_frame`.
+///
+/// # Safety
+/// - `rf` must be a pointer returned by `fastgif_preview_frame`, or null.
+/// - Must not be called more than once for a given pointer.
+#[no_mangle]
+pub unsafe extern "C" fn fastgif_raw_frame_free(rf: *mut RawFrame) {
+    if rf.is_null() {
+        return;
+    }
+    let boxed = Box::from_raw(rf);
+    let n = (boxed.width as usize) * (boxed.height as usize) * 4;
+    drop(Vec::from_raw_parts(boxed.rgba as *mut u8, n, n));
 }
 
 /// Free a `GIFOutput` returned by `fastgif_encode`.

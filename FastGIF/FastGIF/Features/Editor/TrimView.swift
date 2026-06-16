@@ -33,26 +33,28 @@ struct TrimView: View {
                         .frame(width: CGFloat(endFrac - startFrac) * width, height: 36)
                         .offset(x: CGFloat(startFrac) * width)
 
-                    // Start handle
+                    // Start handle — contained to [0, end−minGap], frame-snapped.
                     TrimHandle(color: Theme.accent)
-                        .offset(x: CGFloat(startFrac) * width - 8)
+                        .offset(x: min(max(CGFloat(startFrac) * width - 8, 0), width - 16))
                         .gesture(DragGesture()
                             .onChanged { v in
-                                let frac = max(0, min(v.location.x / width, effectiveEnd / project.videoDuration - 0.01))
-                                project.trimStart = frac * project.videoDuration
+                                guard project.videoDuration > 0, width > 0 else { return }
+                                let t = snap(Double(min(max(v.location.x, 0), width) / width) * project.videoDuration)
+                                project.trimStart = min(max(0, t), effectiveEnd - Self.minGap)
                             }
                             .onEnded { _ in onRetrim() }
                         )
                         .accessibilityLabel("Trim start")
                         .accessibilityValue(formatTime(project.trimStart))
 
-                    // End handle
+                    // End handle — contained to [start+minGap, duration], frame-snapped.
                     TrimHandle(color: Theme.accent)
-                        .offset(x: CGFloat(endFrac) * width - 8)
+                        .offset(x: min(max(CGFloat(endFrac) * width - 8, 0), width - 16))
                         .gesture(DragGesture()
                             .onChanged { v in
-                                let frac = max(project.trimStart / project.videoDuration + 0.01, min(v.location.x / width, 1))
-                                project.trimEnd = frac * project.videoDuration
+                                guard project.videoDuration > 0, width > 0 else { return }
+                                let t = snap(Double(min(max(v.location.x, 0), width) / width) * project.videoDuration)
+                                project.trimEnd = max(project.trimStart + Self.minGap, min(t, project.videoDuration))
                             }
                             .onEnded { _ in onRetrim() }
                         )
@@ -64,6 +66,16 @@ struct TrimView: View {
         }
         .padding(.horizontal, Theme.spacing16)
         .padding(.vertical, Theme.spacing8)
+    }
+
+    /// Hard floor on selection length — handles cannot cross or collapse.
+    private static let minGap: Double = 0.2
+    /// Frame grid for snapping (import samples at 10 fps by default).
+    private static let frameStep: Double = 0.1
+
+    /// Snap a time to the nearest frame boundary.
+    private func snap(_ t: Double) -> Double {
+        (t / Self.frameStep).rounded() * Self.frameStep
     }
 
     private var effectiveEnd: Double {
@@ -88,9 +100,9 @@ struct TrimHandle: View {
     let color: Color
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 3)
+        RoundedRectangle(cornerRadius: Theme.radiusSmall)
             .fill(color)
-            .frame(width: 16, height: 44)
-            .contentShape(Rectangle().inset(by: -10))
+            .frame(width: 16, height: 36)
+            .contentShape(Rectangle().inset(by: -14))
     }
 }

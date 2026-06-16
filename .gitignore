@@ -4,3 +4,16 @@
 .worktrees/
 *.xcuserstate
 DerivedData/
+
+# Rust build artifacts
+target/
+
+# Regenerable verification artifacts (produced deterministically by scripts/make-fixture.sh).
+# The signed flicker baseline (tests/fixtures/flicker-baseline.txt) IS committed —
+# it is the source of truth the gate measures against.
+tests/fixtures/*.bin
+tests/fixtures/*.mov
+tests/fixtures/.out-*.gif
+
+# Machine-specific dev simulator UDID (written by scripts/sim-bootstrap.sh)
+scripts/.sim-udid

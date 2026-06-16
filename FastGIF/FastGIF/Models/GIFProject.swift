@@ -3,6 +3,21 @@ import Foundation
 import Observation
 import AVFoundation
 
+/// Heap-allocated one-byte cancellation flag shared with the Rust encoder.
+/// The Rust side reads it volatile before each frame; flipping it aborts the encode.
+final class CancelFlag: @unchecked Sendable {
+    let pointer: UnsafeMutablePointer<UInt8>
+    init() {
+        pointer = .allocate(capacity: 1)
+        pointer.initialize(to: 0)
+    }
+    func cancel() { pointer.pointee = 1 }
+    deinit {
+        pointer.deinitialize(count: 1)
+        pointer.deallocate()
+    }
+}
+
 /// The single source of truth for the entire app.
 /// iA Writer philosophy: one document, one focus.
 @MainActor @Observable
@@ -24,8 +39,7 @@ final class GIFProject {
 
     // Pipeline config
     var quantizeColors: Int = 256 { didSet { schedulePreview() } }
-    var ditherAlgorithm: DitherAlgorithm = .floydSteinberg { didSet { schedulePreview() } }
-    var ditherStrength: Float = 1.0 { didSet { schedulePreview() } }
+    var quality: Quality = .best { didSet { schedulePreview() } }
     var speed: Double = 1.0 { didSet { schedulePreview() } }
     var loopCount: Int = 0
     var maxWidth: CGFloat? { didSet { schedulePreview() } }
@@ -33,11 +47,26 @@ final class GIFProject {
     var filterPreset: FilterPreset = .none { didSet { schedulePreview() } }
     var filterIntensity: Float = 1.0 { didSet { schedulePreview() } }
 
+    /// User-facing notice surfaced after import (e.g. duration cap applied).
+    var importNotice: String?
+
+    /// Hard duration cap enforced at import. The frame-array RAM model can't hold
+    /// unbounded clips; streaming is deferred to v1.1.
+    static let maxImportDuration: Double = 15
+
     // WYSIWYG preview — processed frames at preview resolution
     var previewFrames: [Frame] = []
+    /// Bumps whenever `previewFrames` is replaced — drives the snap-to-truth
+    /// cross-dissolve and keys the animator (content identity, not frame count).
+    private(set) var previewVersion = 0
     private var previewTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
     private var retrimTask: Task<Void, Never>?
+
+    /// Monotonic preview generation token. Only the newest scheduled preview is
+    /// allowed to write `previewFrames`, so a slow older task can never clobber a
+    /// newer result (closes the stale-write race).
+    private var previewGeneration = 0
 
     // Computed
     var frames: [Frame] { document.frames }
@@ -45,39 +74,57 @@ final class GIFProject {
     var currentTime: Double = 0
     var totalDuration: Double { document.duration }
 
-    /// Build the processing pipeline from current settings.
-    func buildPipeline() -> Pipeline {
-        Pipeline {
-            if let maxWidth {
-                Resize(targetSize: CGSize(width: maxWidth, height: maxWidth))
-            }
+    /// Resolution/sampling profile for the single shared pipeline.
+    enum PipelineScale { case preview, export }
+
+    /// The single source of truth for CPU-side processing. Preview and export run
+    /// the *same* stages; they differ only in resolution (and the caller's frame
+    /// sampling). Quantization + dithering for GIF are owned by the Rust encoder,
+    /// not this pipeline — `BayerDither` is the one exception, applied for `.good`.
+    func buildPipeline(scale: PipelineScale) -> Pipeline {
+        let maxEdge: Int
+        switch scale {
+        case .preview:
+            maxEdge = 240
+        case .export:
+            maxEdge = maxWidth.map { Int($0) }
+                ?? document.frames.first.map { max($0.width, $0.height) }
+                ?? 640
+        }
+        return Pipeline {
+            AspectResize(maxEdge: maxEdge)
             if speed != 1.0 {
                 Speed(multiplier: speed)
             }
             if let stage = filterPreset.toStage(intensity: filterIntensity) {
                 stage
             }
-            Quantize(colors: quantizeColors)
-            Dither(ditherAlgorithm, strength: ditherStrength)
+            if quality.usesBayer {
+                BayerDither(colors: quantizeColors)
+            }
         }
     }
 
-    /// Schedule a debounced preview update (300ms).
+    /// Schedule a debounced preview update (300ms), tagged with a generation token.
     func schedulePreview() {
         previewTask?.cancel()
+        previewGeneration &+= 1
+        let gen = previewGeneration
         previewTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled else { return }
-            await self?.updatePreview()
+            await self?.updatePreview(generation: gen)
         }
     }
 
     /// Process frames at preview resolution for WYSIWYG.
     /// Samples max ~30 frames from the full set for fast preview generation.
-    func updatePreview() async {
-        guard hasFrames else { previewFrames = []; return }
+    /// Each sampled frame is run through the same Rust NeuQuant path as export
+    /// (at the fast `draft` sample factor) so the preview shows true palette
+    /// colors — not a posterize approximation.
+    func updatePreview(generation: Int? = nil) async {
+        guard hasFrames else { previewFrames = []; previewVersion &+= 1; return }
 
-        let previewSize: CGFloat = 240
         let allFrames = document.frames
         // Sample evenly — 30 frames is plenty for a 240px preview
         let maxPreview = 30
@@ -91,21 +138,20 @@ final class GIFProject {
             }
         }
 
-        let pipeline = Pipeline {
-            Resize(targetSize: CGSize(width: previewSize, height: previewSize))
-            if speed != 1.0 {
-                Speed(multiplier: speed)
-            }
-            if let stage = filterPreset.toStage(intensity: filterIntensity) {
-                stage
-            }
-            Quantize(colors: quantizeColors)
-        }
+        let pipeline = buildPipeline(scale: .preview)
+        guard let processed = try? await pipeline.run(sampled) else { return }
+        guard !Task.isCancelled else { return }
 
-        if let processed = try? await pipeline.run(sampled) {
-            guard !Task.isCancelled else { return }
-            previewFrames = processed
-        }
+        // Reconstruct exact palette colors via the shared quantizer (fast factor
+        // for responsiveness; the exact selected-quality still is C6's job).
+        let colors = quantizeColors
+        let factor = Quality.draft.sampleFactor
+        let exact = processed.map { Encoder.previewFrame($0, colors: colors, quality: factor) }
+        guard !Task.isCancelled else { return }
+        // Only the newest generation may publish — discard stale out-of-order writes.
+        if let generation, generation != previewGeneration { return }
+        previewFrames = exact
+        previewVersion &+= 1
     }
 
     /// Process and export with current settings.
@@ -116,19 +162,34 @@ final class GIFProject {
         defer { isProcessing = false }
 
         do {
-            let pipeline = buildPipeline()
+            let pipeline = buildPipeline(scale: .export)
             let frames = document.frames
             let fmt = exportFormat
             let loops = loopCount
+            let colors = quantizeColors
+            let factor = quality.sampleFactor
+            let dither = quality.usesDiffusion
             let processed = try await pipeline.run(frames) { [weak self] p in
                 Task { @MainActor in self?.progress = p * 0.8 }
             }
             progress = 0.8
-            let data = try await Encoder.encode(
-                frames: processed,
-                format: fmt,
-                loopCount: loops
-            )
+            // Cancellable across the FFI: if this task is cancelled (e.g. a newer
+            // export supersedes it), flip the shared flag so the encoder aborts
+            // between frames instead of running to completion off-screen.
+            let flag = CancelFlag()
+            let data = try await withTaskCancellationHandler {
+                try await Encoder.encode(
+                    frames: processed,
+                    format: fmt,
+                    loopCount: loops,
+                    colors: colors,
+                    quality: factor,
+                    dither: dither,
+                    cancel: UnsafePointer(flag.pointer)
+                )
+            } onCancel: {
+                flag.cancel()
+            }
             progress = 1.0
             return data
         } catch {
@@ -149,10 +210,21 @@ final class GIFProject {
         videoDuration = CMTimeGetSeconds(duration)
         sourceVideoURL = url
 
+        // Enforce the hard duration cap; surface the reason if we clamped.
+        let requestedEnd = trimEnd ?? videoDuration
+        let cappedEnd: Double
+        if requestedEnd - trimStart > Self.maxImportDuration {
+            cappedEnd = trimStart + Self.maxImportDuration
+            importNotice = "Limited to the first \(Int(Self.maxImportDuration))s — long clips are capped to keep memory in check."
+        } else {
+            cappedEnd = requestedEnd
+            importNotice = nil
+        }
+
         let frames = try await Decoder.decodeVideo(
             url: url, fps: fps,
             startTime: trimStart,
-            endTime: trimEnd ?? videoDuration
+            endTime: cappedEnd
         ) { [weak self] p in
             Task { @MainActor [weak self] in self?.importProgress = p }
         }
@@ -200,6 +272,7 @@ final class GIFProject {
 
     func moveFrame(from source: IndexSet, to destination: Int) {
         document.frames.move(fromOffsets: source, toOffset: destination)
+        schedulePreview()
     }
 
     func duplicateFrame(at index: Int) {
@@ -217,6 +290,7 @@ final class GIFProject {
     func updateFrameDelay(at index: Int, delay: Double) {
         guard document.frames.indices.contains(index) else { return }
         document.frames[index].delay = delay
+        schedulePreview()
     }
 
     func reset() {
@@ -231,6 +305,7 @@ final class GIFProject {
         importProgress = 0
         progress = 0
         error = nil
+        importNotice = nil
         currentTime = 0
     }
 }

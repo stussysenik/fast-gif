@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreImage
 
 /// iMessage sticker size tiers per Apple HIG.
 enum StickerSize: String, CaseIterable, Identifiable {
@@ -50,12 +51,14 @@ enum StickerOptimizer {
         // Step 3: Try APNG first (best iMessage format)
         var data = try Encoder.encodeAPNG(frames: capped, loopCount: loopCount)
 
-        // Step 4: If over 500KB, progressively reduce quality
+        // Step 4: If over 500KB, progressively reduce color depth.
+        // APNG is lossless PNG, so the Rust GIF palette doesn't apply here —
+        // we posterize per channel to shrink the encoded size.
         var colors = 256
         while data.count > StickerSize.maxFileSize && colors > 16 {
             colors /= 2
-            let quantized = try await Quantize(colors: colors).process(capped)
-            data = try Encoder.encodeAPNG(frames: quantized, loopCount: loopCount)
+            let reduced = posterize(capped, colors: colors)
+            data = try Encoder.encodeAPNG(frames: reduced, loopCount: loopCount)
         }
 
         // Step 5: If still over, reduce frame count
@@ -65,8 +68,8 @@ enum StickerOptimizer {
             optimizedFrames = optimizedFrames.enumerated().compactMap { i, f in
                 i.isMultiple(of: 2) ? Frame(image: f.image, delay: f.delay * 2) : nil
             }
-            let quantized = try await Quantize(colors: colors).process(optimizedFrames)
-            data = try Encoder.encodeAPNG(frames: quantized, loopCount: loopCount)
+            let reduced = posterize(optimizedFrames, colors: colors)
+            data = try Encoder.encodeAPNG(frames: reduced, loopCount: loopCount)
         }
 
         return Result(
@@ -76,5 +79,23 @@ enum StickerOptimizer {
             fileSize: data.count,
             isWithinLimit: data.count <= StickerSize.maxFileSize
         )
+    }
+
+    /// Per-channel posterize to shrink APNG size. `colors` is the total color
+    /// budget; the per-channel level count is its cube root.
+    private static func posterize(_ frames: [Frame], colors: Int) -> [Frame] {
+        let levels = NSNumber(value: max(2, Int(pow(Double(colors), 1.0 / 3.0).rounded())))
+        let context = CIContext(options: [.useSoftwareRenderer: false])
+        return frames.map { frame in
+            autoreleasepool {
+                let ci = CIImage(cgImage: frame.image)
+                guard let filter = CIFilter(name: "CIColorPosterize") else { return frame }
+                filter.setValue(ci, forKey: kCIInputImageKey)
+                filter.setValue(levels, forKey: "inputLevels")
+                guard let output = filter.outputImage,
+                      let cg = context.createCGImage(output, from: output.extent) else { return frame }
+                return Frame(image: cg, delay: frame.delay)
+            }
+        }
     }
 }

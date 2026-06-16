@@ -1,0 +1,35 @@
+# Quality gate — runs the host-side verification harness on every push/PR.
+#
+# This gate is RED by design until the export-truth + zero-flicker work lands
+# (the P2 flicker assertion fails against the signed baseline). That is the
+# point: the harness provably detects the real per-frame-palette defect before
+# any fix exists. It turns green as C3 (global palette) and C4 (temporal
+# diffusion) drive measured flicker under 0.3·B0.
+#
+# macOS runner is required: the fixture generator and the flicker metric use
+# AVFoundation / CoreImage / ImageIO.
+name: verify
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust + iOS-host target
+        run: rustup toolchain install stable --profile minimal
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/fastgif-core/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/fastgif-core/Cargo.lock') }}
+      - name: Run verification harness
+        # RUN_IOS stays off in CI for now: the simulator build lands with the
+        # UI work (C2/C6). The host propositions (Rust + P2 flicker) run here.
+        run: ./scripts/verify.sh

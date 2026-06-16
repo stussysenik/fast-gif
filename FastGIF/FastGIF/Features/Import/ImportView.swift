@@ -53,8 +53,18 @@ struct ImportView: View {
             }
             .frame(maxWidth: 280)
 
+            if let notice = project.importNotice {
+                Label(notice, systemImage: "clock.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 280)
+                    .transition(.opacity)
+            }
+
             Spacer()
         }
+        .animation(.easeInOut, value: project.importNotice)
         .onChange(of: selectedItems) {
             Task { await handleSelection(selectedItems) }
         }
