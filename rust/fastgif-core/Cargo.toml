@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["staticlib"]
+# staticlib: linked into the iOS app. rlib: lets host-side bins/integration
+# tests (the verification harness) call the FFI directly without the simulator.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 color_quant = "1.1"
