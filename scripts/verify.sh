@@ -105,8 +105,8 @@ else
 fi
 
 # Witnesses that land in later commits — surfaced, not silently skipped.
-for w in "P1:tests/sierra_parity.rs:C5" "P3:FastGIF/FastGIFTests/PreviewParityTests.swift:C2" \
-         "P4:rust/fastgif-core/tests/sampling_sufficiency.rs:C3" "P5:determinism witness:C4"; do
+for w in "P1:rust/fastgif-core/tests/sierra_parity.rs:C5" "P3:FastGIF/FastGIFTests/PreviewParityTests.swift:C2" \
+         "P4:rust/fastgif-core/tests/sampling_sufficiency.rs:C3" "P5:scripts/determinism.sh:C4"; do
     id="${w%%:*}"; rest="${w#*:}"; path="${rest%:*}"; commit="${rest##*:}"
     if [[ -e "$REPO/$path" ]]; then
         record PASS "$id-present" "$path exists"
@@ -114,6 +114,18 @@ for w in "P1:tests/sierra_parity.rs:C5" "P3:FastGIF/FastGIFTests/PreviewParityTe
         record PEND "$id-pending" "lands in $commit ($path)"
     fi
 done
+
+# P5 — cross-arch determinism (runs the witness if both host arches are present).
+if [[ -x "$REPO/scripts/determinism.sh" ]]; then
+    DET_OUT="$(COLORS="$COLORS" "$REPO/scripts/determinism.sh" 2>&1)"; DET_RC=$?
+    if [[ $DET_RC -eq 0 ]] && echo "$DET_OUT" | grep -q "PASS"; then
+        record PASS "P5-determinism" "GIF bytes identical across arches"
+    elif echo "$DET_OUT" | grep -q "skipping"; then
+        record PEND "P5-determinism" "skipped (missing host arch target)"
+    else
+        record FAIL "P5-determinism" "output diverged across arches"
+    fi
+fi
 
 # --- Stage 5: iOS build/test (optional; needs a booted sim) ---
 say "[5/5] iOS build + test"

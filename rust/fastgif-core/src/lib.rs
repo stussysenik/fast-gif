@@ -211,17 +211,31 @@ pub unsafe extern "C" fn fastgif_encode_global(
         };
         enc.set_repeat(repeat)?;
 
+        // Temporal carry: the diffusion error buffer is threaded frame→frame so the
+        // dither pattern is temporally coherent (kills the shimmer that spatial-only
+        // diffusion bleeds from moving regions into static ones). A scene cut resets
+        // the carry so a hard cut doesn't smear.
+        let mut carry: Vec<i32> = vec![0i32; (w as usize) * (h as usize) * 3];
+        let mut prev: Option<&[u8]> = None;
+
         for rf in raw_frames {
             let fw = rf.width as usize;
             let fh = rf.height as usize;
             let rgba = slice::from_raw_parts(rf.rgba, fw * fh * 4);
 
             let indices = if dither != 0 {
-                let mut err = vec![0i32; fw * fh * 3];
-                diffuse::diffuse_sequential(rgba, fw, fh, &palette, &mut err)
+                if carry.len() != fw * fh * 3 {
+                    carry = vec![0i32; fw * fh * 3]; // dims changed; restart carry
+                } else if let Some(p) = prev {
+                    if p.len() == rgba.len() && diffuse::scene_changed(p, rgba) {
+                        carry.iter_mut().for_each(|e| *e = 0);
+                    }
+                }
+                diffuse::diffuse_temporal(rgba, fw, fh, &palette, &mut carry)
             } else {
                 diffuse::map_nearest(rgba, &palette)
             };
+            prev = Some(rgba);
 
             let mut frame = gif::Frame::default();
             frame.width = rf.width as u16;

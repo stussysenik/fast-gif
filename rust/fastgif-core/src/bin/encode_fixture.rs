@@ -36,12 +36,14 @@ fn main() {
     let mut colors: u32 = 256;
     let mut quality: i32 = 10;
     let mut global = false;
+    let mut dither: u8 = 1;
     let mut i = 3;
     while i < argv.len() {
         match argv[i].as_str() {
             "--colors" => { i += 1; colors = argv[i].parse().unwrap_or(256); }
             "--quality" => { i += 1; quality = argv[i].parse().unwrap_or(10); }
             "--global" => { global = true; }
+            "--no-dither" => { dither = 0; }
             other => die(&format!("unexpected arg: {other}")),
         }
         i += 1;
@@ -80,7 +82,7 @@ fn main() {
     // The global path applies spatial Sierra diffusion (dither=1), representing the
     // `best` export tier the flicker gate measures.
     let out = if global {
-        unsafe { fastgif_encode_global(frames.as_ptr(), frames.len(), colors, 0, quality, 1) }
+        unsafe { fastgif_encode_global(frames.as_ptr(), frames.len(), colors, 0, quality, dither) }
     } else {
         unsafe { fastgif_encode(frames.as_ptr(), frames.len(), colors, 0, quality) }
     };
